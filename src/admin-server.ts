@@ -61,6 +61,36 @@ type AnalyticsSummary = {
   }>;
 };
 
+type ChannelSettings = {
+  id: string;
+  max_channel_id: string;
+  title: string;
+  channel_kind: "moms" | "news";
+  enabled: boolean;
+  mode: string;
+  bot_name: string | null;
+  bot_signature: string | null;
+  tone: string;
+  emoji_level: number;
+  humor_level: number;
+  teasing_level: number;
+  level_3_acknowledged_at: string | null;
+  level_3_review_policy: string;
+  working_hours_enabled: boolean;
+  working_hours_timezone: string;
+  working_hours_start: string | null;
+  working_hours_end: string | null;
+  answer_delay_min_seconds: number;
+  answer_delay_max_seconds: number;
+  reply_limit_hour: number;
+  reply_limit_day: number;
+  initiative_limit_hour: number;
+  initiative_limit_day: number;
+  user_tease_limit_day: number;
+  politics_teasing_level: number;
+  dry_run: boolean;
+};
+
 const server = createServer(async (req, res) => {
   try {
     if (!req.url || !req.method) {
@@ -88,6 +118,18 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/channels") {
+      sendJson(res, 200, await listChannels());
+      return;
+    }
+
+    const channelMatch = url.pathname.match(/^\/api\/channels\/([0-9a-f-]+)$/);
+    if (req.method === "PATCH" && channelMatch) {
+      const [, id] = channelMatch;
+      sendJson(res, 200, await updateChannel(id, await readJson(req)));
+      return;
+    }
+
     const actionMatch = url.pathname.match(/^\/api\/actions\/([0-9a-f-]+)\/(approve|skip|stop-thread|delete-own)$/);
     if (req.method === "POST" && actionMatch) {
       const [, id, command] = actionMatch;
@@ -97,7 +139,8 @@ const server = createServer(async (req, res) => {
 
     sendJson(res, 404, { error: "Not found" });
   } catch (error) {
-    sendJson(res, 500, { error: error instanceof Error ? error.message : String(error) });
+    const status = error instanceof HttpError ? error.status : 500;
+    sendJson(res, status, { error: error instanceof Error ? error.message : String(error) });
   }
 });
 
@@ -343,6 +386,76 @@ async function getAnalyticsSummary(): Promise<AnalyticsSummary> {
   };
 }
 
+async function listChannels(): Promise<{ channels: ChannelSettings[] }> {
+  const { data, error } = await supabase
+    .from("max_engagement_channels")
+    .select(
+      "id, max_channel_id, title, channel_kind, enabled, mode, bot_name, bot_signature, tone, emoji_level, humor_level, teasing_level, level_3_acknowledged_at, level_3_review_policy, working_hours_enabled, working_hours_timezone, working_hours_start, working_hours_end, answer_delay_min_seconds, answer_delay_max_seconds, reply_limit_hour, reply_limit_day, initiative_limit_hour, initiative_limit_day, user_tease_limit_day, politics_teasing_level, dry_run"
+    )
+    .order("updated_at", { ascending: false });
+
+  if (error) {
+    throw error;
+  }
+
+  return {
+    channels: (data ?? []) as ChannelSettings[]
+  };
+}
+
+async function updateChannel(id: string, body: unknown): Promise<{ ok: true }> {
+  const input = body as Record<string, unknown>;
+  const teasingLevel = clampInteger(input.teasing_level, 0, 3, "teasing_level");
+  const level3Acknowledged = Boolean(input.level_3_acknowledged);
+
+  if (teasingLevel === 3 && !level3Acknowledged) {
+    throw new HttpError(400, "Уровень 3 требует явного подтверждения риска");
+  }
+
+  const patch = {
+    enabled: Boolean(input.enabled),
+    dry_run: Boolean(input.dry_run),
+    title: requiredString(input.title, "title"),
+    channel_kind: enumString(input.channel_kind, ["moms", "news"], "channel_kind"),
+    mode: enumString(
+      input.mode,
+      ["off", "mentions_only", "questions_only", "suitable_messages", "revive", "moderation_only"],
+      "mode"
+    ),
+    bot_name: optionalString(input.bot_name),
+    bot_signature: optionalString(input.bot_signature),
+    tone: enumString(input.tone, ["friendly", "neutral", "official", "conversational"], "tone"),
+    emoji_level: clampInteger(input.emoji_level, 0, 3, "emoji_level"),
+    humor_level: clampInteger(input.humor_level, 0, 3, "humor_level"),
+    teasing_level: teasingLevel,
+    level_3_acknowledged_at: teasingLevel === 3 ? new Date().toISOString() : null,
+    level_3_review_policy: enumString(input.level_3_review_policy, ["draft_required", "post_moderation"], "level_3_review_policy"),
+    working_hours_enabled: Boolean(input.working_hours_enabled),
+    working_hours_timezone: optionalString(input.working_hours_timezone) || "Europe/Moscow",
+    working_hours_start: optionalTime(input.working_hours_start),
+    working_hours_end: optionalTime(input.working_hours_end),
+    answer_delay_min_seconds: clampInteger(input.answer_delay_min_seconds, 0, 86400, "answer_delay_min_seconds"),
+    answer_delay_max_seconds: clampInteger(input.answer_delay_max_seconds, 0, 86400, "answer_delay_max_seconds"),
+    reply_limit_hour: clampInteger(input.reply_limit_hour, 0, 10000, "reply_limit_hour"),
+    reply_limit_day: clampInteger(input.reply_limit_day, 0, 100000, "reply_limit_day"),
+    initiative_limit_hour: clampInteger(input.initiative_limit_hour, 0, 10000, "initiative_limit_hour"),
+    initiative_limit_day: clampInteger(input.initiative_limit_day, 0, 100000, "initiative_limit_day"),
+    user_tease_limit_day: clampInteger(input.user_tease_limit_day, 0, 1000, "user_tease_limit_day"),
+    politics_teasing_level: clampInteger(input.politics_teasing_level, 0, 3, "politics_teasing_level")
+  };
+
+  if (patch.answer_delay_max_seconds < patch.answer_delay_min_seconds) {
+    throw new HttpError(400, "Максимальная задержка не может быть меньше минимальной");
+  }
+
+  const { error } = await supabase.from("max_engagement_channels").update(patch).eq("id", id);
+  if (error) {
+    throw error;
+  }
+
+  return { ok: true };
+}
+
 function sendHtml(res: ServerResponse, html: string): void {
   res.writeHead(200, {
     "content-type": "text/html; charset=utf-8",
@@ -369,6 +482,76 @@ function getText(row: Record<string, unknown> | undefined, key: string): string 
 
 function toNullableNumber(value: unknown): number | null {
   return typeof value === "number" ? value : null;
+}
+
+async function readJson(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+
+  const raw = Buffer.concat(chunks).toString("utf8");
+  if (!raw.trim()) {
+    return {};
+  }
+
+  return JSON.parse(raw);
+}
+
+class HttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string
+  ) {
+    super(message);
+  }
+}
+
+function requiredString(value: unknown, field: string): string {
+  const result = optionalString(value);
+  if (!result) {
+    throw new HttpError(400, `${field} is required`);
+  }
+  return result;
+}
+
+function optionalString(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function enumString<T extends string>(value: unknown, allowed: readonly T[], field: string): T {
+  if (typeof value === "string" && allowed.includes(value as T)) {
+    return value as T;
+  }
+
+  throw new HttpError(400, `${field} has invalid value`);
+}
+
+function clampInteger(value: unknown, min: number, max: number, field: string): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw new HttpError(400, `${field} must be an integer between ${min} and ${max}`);
+  }
+
+  return parsed;
+}
+
+function optionalTime(value: unknown): string | null {
+  const time = optionalString(value);
+  if (!time) {
+    return null;
+  }
+
+  if (!/^\d{2}:\d{2}(:\d{2})?$/.test(time)) {
+    throw new HttpError(400, "working hours must use HH:MM format");
+  }
+
+  return time.length === 5 ? `${time}:00` : time;
 }
 
 function renderDashboard(): string {
@@ -511,6 +694,81 @@ function renderDashboard(): string {
       gap: 10px;
     }
 
+    .settings-grid {
+      display: grid;
+      gap: 12px;
+    }
+
+    .settings-form {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+
+    .form-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .field {
+      display: grid;
+      gap: 6px;
+      min-width: 0;
+    }
+
+    .field.wide {
+      grid-column: span 2;
+    }
+
+    .field.full {
+      grid-column: 1 / -1;
+    }
+
+    label {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    input, select, textarea {
+      width: 100%;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 7px 9px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    textarea {
+      min-height: 70px;
+      resize: vertical;
+    }
+
+    input[type="checkbox"] {
+      width: 18px;
+      min-height: 18px;
+    }
+
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+    }
+
+    .risk {
+      grid-column: 1 / -1;
+      border: 1px solid #e4b9b9;
+      background: #fff5f5;
+      border-radius: 8px;
+      padding: 10px;
+    }
+
     .item {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -603,6 +861,8 @@ function renderDashboard(): string {
       .item-body { grid-template-columns: 1fr; }
       .cell + .cell { border-left: 0; border-top: 1px solid var(--line); }
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .form-grid { grid-template-columns: 1fr; }
+      .field.wide, .field.full { grid-column: 1; }
     }
   </style>
 </head>
@@ -617,6 +877,7 @@ function renderDashboard(): string {
       <button class="tab" data-view="teases">Журнал подколов</button>
       <button class="tab" data-view="level3">Только уровень 3</button>
       <button class="tab" data-view="analytics">Аналитика</button>
+      <button class="tab" data-view="settings">Настройки каналов</button>
     </nav>
     <div class="toolbar">
       <div class="status" id="status">Загрузка...</div>
@@ -652,6 +913,14 @@ function renderDashboard(): string {
           if (!response.ok) throw new Error(payload.error || "Ошибка загрузки");
           renderAnalytics(payload);
           status.textContent = "Аналитика по текущим данным Supabase";
+        } else if (currentView === "settings") {
+          const response = await fetch("/api/channels");
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || "Ошибка загрузки");
+          renderSettings(payload.channels || []);
+          status.textContent = payload.channels.length
+            ? "Каналов: " + payload.channels.length
+            : "Нет подключенных каналов";
         } else {
           const query = currentView === "level3" ? "?view=teases&level=3" : "?view=" + currentView;
           const response = await fetch("/api/actions" + query);
@@ -670,6 +939,84 @@ function renderDashboard(): string {
       } finally {
         refresh.disabled = false;
       }
+    }
+
+    function renderSettings(channels) {
+      metrics.hidden = true;
+      metrics.innerHTML = "";
+
+      if (!channels.length) {
+        list.innerHTML = '<div class="empty">Каналы не найдены. Запустите seed или подключите канал MAX.</div>';
+        return;
+      }
+
+      list.innerHTML = '<div class="settings-grid">' + channels.map((channel) => \`
+        <form class="settings-form" data-channel-id="\${channel.id}" onsubmit="saveChannel(event)">
+          <div class="item-head" style="padding: 0 0 12px; border-bottom: 1px solid var(--line);">
+            <div>
+              <strong>\${escapeHtml(channel.title)}</strong>
+              <div class="meta">
+                <span class="badge">\${escapeHtml(channel.max_channel_id)}</span>
+                <span class="badge">\${channel.enabled ? "включен" : "выключен"}</span>
+                <span class="badge">\${channel.dry_run ? "dry-run" : "live"}</span>
+              </div>
+            </div>
+            <div class="actions">
+              <button class="primary" type="submit">Сохранить</button>
+            </div>
+          </div>
+          <div class="form-grid">
+            \${field("Название", "title", channel.title, "text", "wide")}
+            \${field("Имя бота", "bot_name", channel.bot_name || "", "text")}
+            \${selectField("Тип паблика", "channel_kind", channel.channel_kind, [["moms", "мамочки"], ["news", "новости"]])}
+            \${selectField("Режим", "mode", channel.mode, [
+              ["off", "выключен"],
+              ["mentions_only", "только упоминания"],
+              ["questions_only", "только вопросы"],
+              ["suitable_messages", "все подходящие"],
+              ["revive", "оживление"],
+              ["moderation_only", "модерация без ответов"]
+            ])}
+            \${selectField("Тон", "tone", channel.tone, [
+              ["friendly", "дружелюбный"],
+              ["neutral", "нейтральный"],
+              ["official", "официальный"],
+              ["conversational", "разговорный"]
+            ])}
+            \${numberField("Уровень подкола", "teasing_level", channel.teasing_level, 0, 3)}
+            \${numberField("Политика/спорное", "politics_teasing_level", channel.politics_teasing_level, 0, 3)}
+            \${selectField("Ревью уровня 3", "level_3_review_policy", channel.level_3_review_policy, [
+              ["draft_required", "черновик обязателен"],
+              ["post_moderation", "пост-модерация"]
+            ])}
+            \${numberField("Эмодзи", "emoji_level", channel.emoji_level, 0, 3)}
+            \${numberField("Юмор", "humor_level", channel.humor_level, 0, 3)}
+            \${numberField("Ответов/час", "reply_limit_hour", channel.reply_limit_hour, 0, 10000)}
+            \${numberField("Ответов/сутки", "reply_limit_day", channel.reply_limit_day, 0, 100000)}
+            \${numberField("Инициатив/час", "initiative_limit_hour", channel.initiative_limit_hour, 0, 10000)}
+            \${numberField("Инициатив/сутки", "initiative_limit_day", channel.initiative_limit_day, 0, 100000)}
+            \${numberField("Подколов на пользователя/сутки", "user_tease_limit_day", channel.user_tease_limit_day, 0, 1000, "wide")}
+            \${numberField("Мин. задержка, сек", "answer_delay_min_seconds", channel.answer_delay_min_seconds, 0, 86400)}
+            \${numberField("Макс. задержка, сек", "answer_delay_max_seconds", channel.answer_delay_max_seconds, 0, 86400)}
+            \${field("Часовой пояс", "working_hours_timezone", channel.working_hours_timezone, "text")}
+            \${field("Начало работы", "working_hours_start", normalizeTime(channel.working_hours_start), "time")}
+            \${field("Конец работы", "working_hours_end", normalizeTime(channel.working_hours_end), "time")}
+            <div class="field"><label>Включен</label><div class="check-row"><input name="enabled" type="checkbox" \${channel.enabled ? "checked" : ""}> <span>бот активен</span></div></div>
+            <div class="field"><label>Dry-run</label><div class="check-row"><input name="dry_run" type="checkbox" \${channel.dry_run ? "checked" : ""}> <span>не публиковать в MAX</span></div></div>
+            <div class="field"><label>Рабочее время</label><div class="check-row"><input name="working_hours_enabled" type="checkbox" \${channel.working_hours_enabled ? "checked" : ""}> <span>учитывать расписание</span></div></div>
+            <div class="field full">
+              <label>Подпись</label>
+              <textarea name="bot_signature">\${escapeHtml(channel.bot_signature || "")}</textarea>
+            </div>
+            <div class="risk">
+              <div class="check-row">
+                <input name="level_3_acknowledged" type="checkbox" \${channel.level_3_acknowledged_at ? "checked" : ""}>
+                <span>Понимаю риски уровня 3: прямой стёб над репликой требует регулярного ревью и может быть сохранён только с этим подтверждением.</span>
+              </div>
+            </div>
+          </div>
+        </form>
+      \`).join("") + '</div>';
     }
 
     function renderActions(actions) {
@@ -790,6 +1137,37 @@ function renderDashboard(): string {
       await load();
     }
 
+    async function saveChannel(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const id = form.dataset.channelId;
+      const body = Object.fromEntries(new FormData(form).entries());
+      for (const checkbox of form.querySelectorAll('input[type="checkbox"]')) {
+        body[checkbox.name] = checkbox.checked;
+      }
+      for (const number of form.querySelectorAll('input[type="number"]')) {
+        body[number.name] = Number(number.value);
+      }
+
+      if (Number(body.teasing_level) === 3 && !body.level_3_acknowledged) {
+        status.textContent = "Уровень 3 требует явного подтверждения риска";
+        return;
+      }
+
+      status.textContent = "Сохраняю настройки...";
+      const response = await fetch("/api/channels/" + id, {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        status.textContent = payload.error || "Ошибка сохранения";
+        return;
+      }
+      await load();
+    }
+
     function escapeHtml(value) {
       return String(value)
         .replaceAll("&", "&amp;")
@@ -802,6 +1180,36 @@ function renderDashboard(): string {
     function formatDelta(value) {
       if (value === null || value === undefined) return "нет данных";
       return value > 0 ? "+" + value : String(value);
+    }
+
+    function field(label, name, value, type, className = "") {
+      return \`<div class="field \${className}">
+        <label>\${escapeHtml(label)}</label>
+        <input name="\${escapeHtml(name)}" type="\${escapeHtml(type)}" value="\${escapeHtml(value || "")}">
+      </div>\`;
+    }
+
+    function numberField(label, name, value, min, max, className = "") {
+      return \`<div class="field \${className}">
+        <label>\${escapeHtml(label)}</label>
+        <input name="\${escapeHtml(name)}" type="number" min="\${min}" max="\${max}" step="1" value="\${escapeHtml(value ?? 0)}">
+      </div>\`;
+    }
+
+    function selectField(label, name, value, options) {
+      return \`<div class="field">
+        <label>\${escapeHtml(label)}</label>
+        <select name="\${escapeHtml(name)}">
+          \${options.map(([optionValue, optionLabel]) => \`
+            <option value="\${escapeHtml(optionValue)}" \${optionValue === value ? "selected" : ""}>\${escapeHtml(optionLabel)}</option>
+          \`).join("")}
+        </select>
+      </div>\`;
+    }
+
+    function normalizeTime(value) {
+      if (!value) return "";
+      return String(value).slice(0, 5);
     }
   </script>
 </body>
