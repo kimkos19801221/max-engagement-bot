@@ -36,9 +36,11 @@ SUPABASE_SECRET_KEY=your-service-role-or-secret-key
 
 ```bash
 npm install
+npm run seed:test
 npm run typecheck
 npm test
 npm run dev:dry-run
+npm run admin:local
 ```
 
 `npm run dev:dry-run` делает один проход:
@@ -47,6 +49,11 @@ npm run dev:dry-run
 2. Находит новые комментарии подписчиков в `max_engagement_comments`.
 3. Проверяет режим, лимиты, стоп-триггеры и классификацию поста.
 4. Создает запись в `max_engagement_bot_actions` со статусом `draft`.
+
+`npm run admin:local` открывает локальную панель ревью на
+`http://127.0.0.1:4317`. Это только локальный инструмент: перед размещением
+админ-панели в Timeweb нужно отдельно добавить авторизацию и согласовать любые
+порты/Nginx-настройки, чтобы не задеть DecorRent.
 
 ## Timeweb Cloud
 
