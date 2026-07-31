@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev:dry-run": "tsx src/worker.ts --once",
+    "seed:test": "tsx src/seed-test-data.ts",
     "start": "tsx src/worker.ts --loop",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
