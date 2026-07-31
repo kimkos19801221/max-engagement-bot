@@ -57,6 +57,15 @@ export type MaxEngagementChannelSettings = {
   politicsTeasingLevel: TeasingLevel;
 };
 
+export type MaxEngagementChannelRecord = MaxEngagementChannelSettings & {
+  id: string;
+  maxChannelId: string;
+  title: string;
+  dryRun: boolean;
+  botName?: string;
+  botSignature?: string;
+};
+
 export type MaxEngagementPostContext = {
   classification: MaxEngagementPostClassification;
   classificationConfidence: number;
@@ -71,3 +80,36 @@ export type MaxEngagementPostContext = {
   hasStopTrigger: boolean;
 };
 
+export type MaxEngagementPostRecord = {
+  id: string;
+  channelId: string;
+  maxPostId: string;
+  text: string | null;
+  classification: MaxEngagementPostClassification;
+  classificationConfidence: number;
+};
+
+export type MaxEngagementThreadRecord = {
+  id: string;
+  channelId: string;
+  postId: string;
+  maxThreadId: string;
+  status: MaxEngagementThreadStatus;
+};
+
+export type MaxEngagementCommentRecord = {
+  id: string;
+  channelId: string;
+  postId: string;
+  threadId: string | null;
+  maxCommentId: string | null;
+  authorUserId: string | null;
+  authorName: string | null;
+  text: string;
+  postedAt: string | null;
+};
+
+export type MaxEngagementGeneratedDraft = {
+  text: string;
+  safetyReason: string;
+};

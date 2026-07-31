@@ -4,10 +4,21 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "dev:dry-run": "tsx src/worker.ts --once",
+    "start": "tsx src/worker.ts --loop",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "typescript": "^5.6.3"
+    "@types/node": "^26.1.2",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.1",
+    "typescript": "^5.6.3",
+    "vitest": "^4.1.10"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.109.0",
+    "dotenv": "^17.4.2",
+    "ws": "^8.21.1"
   }
 }
-

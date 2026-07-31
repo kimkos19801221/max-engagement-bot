@@ -1,0 +1,18 @@
+name: max-engagement-bot
+
+services:
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: max-engagement-bot-worker
+    restart: unless-stopped
+    env_file:
+      - path: .env.timeweb
+        required: false
+    networks:
+      - max-engagement-bot-net
+
+networks:
+  max-engagement-bot-net:
+    name: max-engagement-bot-net
