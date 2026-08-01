@@ -9,9 +9,12 @@ import type {
   MaxEngagementPostRecord,
   MaxEngagementThreadRecord,
   MaxEngagementThreadStatus,
+  MaxApiComment,
+  MaxApiPost,
   MaxEngagementTone,
   TeasingLevel
 } from "./types.js";
+import { classifyPostText } from "./content-safety.js";
 
 type ChannelRow = Record<string, unknown>;
 type CommentRow = Record<string, unknown>;
@@ -192,6 +195,124 @@ export class MaxEngagementRepository {
     if (error) {
       throw error;
     }
+  }
+
+  async upsertMaxPost(channel: MaxEngagementChannelRecord, post: MaxApiPost): Promise<MaxEngagementPostRecord> {
+    const classification = classifyPostText(post.text);
+    const { data, error } = await this.supabase
+      .from("max_engagement_posts")
+      .upsert(
+        {
+          channel_id: channel.id,
+          max_post_id: post.id,
+          source_url: post.url ?? null,
+          author_name: post.authorName ?? null,
+          text: post.text,
+          posted_at: post.postedAt ?? null,
+          classification: classification.classification,
+          classification_confidence: classification.confidence,
+          classification_reason: classification.reason,
+          forced_teasing_level: classification.classification === "neutral" || classification.classification === "entertainment" ? channel.teasingLevel : 0,
+          comments_before: post.commentsCount ?? null,
+          reactions_before: post.reactionsCount ?? null
+        },
+        { onConflict: "channel_id,max_post_id" }
+      )
+      .select("id, channel_id, max_post_id, text, classification, classification_confidence")
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    return mapPost(data as PostRow);
+  }
+
+  async upsertMaxThread(channelId: string, postId: string, maxThreadId: string): Promise<MaxEngagementThreadRecord> {
+    const { data, error } = await this.supabase
+      .from("max_engagement_threads")
+      .upsert(
+        {
+          channel_id: channelId,
+          post_id: postId,
+          max_thread_id: maxThreadId,
+          status: "active"
+        },
+        { onConflict: "post_id,max_thread_id" }
+      )
+      .select("id, channel_id, post_id, max_thread_id, status")
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    return mapThread(data as ThreadRow);
+  }
+
+  async upsertMaxComment(
+    channelId: string,
+    postId: string,
+    threadId: string,
+    comment: MaxApiComment
+  ): Promise<MaxEngagementCommentRecord> {
+    const { data: existing, error: existingError } = await this.supabase
+      .from("max_engagement_comments")
+      .select("id")
+      .eq("channel_id", channelId)
+      .eq("max_comment_id", comment.id)
+      .maybeSingle();
+
+    if (existingError) {
+      throw existingError;
+    }
+
+    if (existing) {
+      const { data, error } = await this.supabase
+        .from("max_engagement_comments")
+        .update({
+          post_id: postId,
+          thread_id: threadId,
+          parent_max_comment_id: comment.parentCommentId ?? null,
+          author_user_id: comment.authorUserId ?? null,
+          author_name: comment.authorName ?? null,
+          text: comment.text,
+          posted_at: comment.postedAt ?? null
+        })
+        .eq("id", existing.id)
+        .select("id, channel_id, post_id, thread_id, max_comment_id, author_user_id, author_name, text, posted_at")
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      return mapComment(data as CommentRow);
+    }
+
+    const { data, error } = await this.supabase
+      .from("max_engagement_comments")
+      .insert({
+        channel_id: channelId,
+        post_id: postId,
+        thread_id: threadId,
+        max_comment_id: comment.id,
+        parent_max_comment_id: comment.parentCommentId ?? null,
+        author_user_id: comment.authorUserId ?? null,
+        author_name: comment.authorName ?? null,
+        text: comment.text,
+        comment_kind: "subscriber",
+        sentiment: "unknown",
+        posted_at: comment.postedAt ?? null
+      })
+      .select("id, channel_id, post_id, thread_id, max_comment_id, author_user_id, author_name, text, posted_at")
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    return mapComment(data as CommentRow);
   }
 
   private async listProcessedTriggerIds(triggerIds: string[]): Promise<Set<string>> {

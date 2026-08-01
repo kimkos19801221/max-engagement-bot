@@ -113,3 +113,43 @@ export type MaxEngagementGeneratedDraft = {
   text: string;
   safetyReason: string;
 };
+
+export type MaxApiPost = {
+  id: string;
+  channelId: string;
+  url?: string;
+  authorName?: string;
+  text: string;
+  postedAt?: string;
+  commentsCount?: number;
+  reactionsCount?: number;
+};
+
+export type MaxApiComment = {
+  id: string;
+  postId: string;
+  threadId: string;
+  parentCommentId?: string;
+  authorUserId?: string;
+  authorName?: string;
+  text: string;
+  postedAt?: string;
+};
+
+export type MaxPublishCommentInput = {
+  channelId: string;
+  postId: string;
+  threadId: string;
+  text: string;
+};
+
+export type MaxPublishCommentResult = {
+  commentId: string;
+};
+
+export type MaxClient = {
+  fetchPosts(channel: MaxEngagementChannelRecord): Promise<MaxApiPost[]>;
+  fetchComments(channel: MaxEngagementChannelRecord, post: MaxApiPost): Promise<MaxApiComment[]>;
+  publishComment(input: MaxPublishCommentInput): Promise<MaxPublishCommentResult>;
+  deleteOwnComment(channelId: string, commentId: string): Promise<void>;
+};
