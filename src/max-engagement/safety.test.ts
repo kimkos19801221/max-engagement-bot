@@ -63,5 +63,6 @@ describe("MAX engagement safety", () => {
   it("detects questions and stop-trigger text", () => {
     expect(looksLikeQuestion("А где это купить?")).toBe(true);
     expect(hasStopTrigger("Это грубо, удалите комментарий")).toBe(true);
+    expect(hasStopTrigger("Наконец-то хорошие новости, а не вечные жалобы")).toBe(false);
   });
 });

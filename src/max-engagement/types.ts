@@ -153,3 +153,67 @@ export type MaxClient = {
   publishComment(input: MaxPublishCommentInput): Promise<MaxPublishCommentResult>;
   deleteOwnComment(channelId: string, commentId: string): Promise<void>;
 };
+
+export type MaxUpdateType =
+  | "bot_added"
+  | "bot_started"
+  | "bot_stopped"
+  | "bot_removed"
+  | "chat_title_changed"
+  | "dialog_cleared"
+  | "dialog_muted"
+  | "dialog_unmuted"
+  | "dialog_removed"
+  | "message_callback"
+  | "message_created"
+  | "message_edited"
+  | "message_removed"
+  | "user_added"
+  | "user_removed";
+
+export type MaxUpdateUser = {
+  user_id?: number | string;
+  name?: string;
+  username?: string;
+  is_bot?: boolean;
+};
+
+export type MaxUpdateMessage = {
+  sender?: MaxUpdateUser;
+  recipient?: {
+    chat_id?: number | string;
+    user_id?: number | string;
+    id?: number | string;
+    type?: string;
+  };
+  timestamp?: number;
+  link?: {
+    mid?: string;
+    type?: string;
+    sender?: MaxUpdateUser;
+    chat_id?: number | string;
+    message?: MaxUpdateMessage;
+  } | null;
+  body?: {
+    mid?: string;
+    text?: string | null;
+    attachments?: unknown[] | null;
+  } | null;
+  stat?: {
+    views?: number;
+    likes?: number;
+    reactions?: number;
+    comments?: number;
+  } | null;
+  url?: string | null;
+};
+
+export type MaxUpdate = {
+  update_type: MaxUpdateType | string;
+  timestamp?: number;
+  chat_id?: number | string;
+  user?: MaxUpdateUser;
+  is_channel?: boolean;
+  message?: MaxUpdateMessage;
+  payload?: string | null;
+};

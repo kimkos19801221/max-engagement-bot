@@ -21,6 +21,30 @@ type CommentRow = Record<string, unknown>;
 type PostRow = Record<string, unknown>;
 type ThreadRow = Record<string, unknown>;
 
+export type BotActionInput = {
+  channelId: string;
+  postId: string;
+  threadId: string | null;
+  triggerCommentId: string;
+  actionType: "reply" | "initiative" | "moderate" | "stop_thread";
+  status: "draft" | "queued" | "skipped";
+  requestedTeasingLevel: TeasingLevel;
+  finalTeasingLevel: TeasingLevel;
+  safetyReason: string;
+  generatedText: string | null;
+  requiresHumanReview: boolean;
+};
+
+export type EngagementRepository = {
+  listRunnableChannels(limit?: number): Promise<MaxEngagementChannelRecord[]>;
+  listUnprocessedSubscriberComments(channelId: string, limit?: number): Promise<MaxEngagementCommentRecord[]>;
+  getPost(postId: string): Promise<MaxEngagementPostRecord | null>;
+  getThread(threadId: string | null): Promise<MaxEngagementThreadRecord | null>;
+  countActions(channelId: string, actionType: "reply" | "initiative", sinceIso: string): Promise<number>;
+  countUserTeasesToday(channelId: string, authorUserId: string | null, sinceIso: string): Promise<number>;
+  createBotAction(input: BotActionInput): Promise<void>;
+};
+
 export function createSupabaseClientFromEnv(): SupabaseClient {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_PUBLISHABLE_KEY;
@@ -165,19 +189,7 @@ export class MaxEngagementRepository {
     return count ?? 0;
   }
 
-  async createBotAction(input: {
-    channelId: string;
-    postId: string;
-    threadId: string | null;
-    triggerCommentId: string;
-    actionType: "reply" | "initiative" | "moderate" | "stop_thread";
-    status: "draft" | "queued" | "skipped";
-    requestedTeasingLevel: TeasingLevel;
-    finalTeasingLevel: TeasingLevel;
-    safetyReason: string;
-    generatedText: string | null;
-    requiresHumanReview: boolean;
-  }): Promise<void> {
+  async createBotAction(input: BotActionInput): Promise<void> {
     const { error } = await this.supabase.from("max_engagement_bot_actions").insert({
       channel_id: input.channelId,
       post_id: input.postId,

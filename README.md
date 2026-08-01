@@ -14,6 +14,7 @@ Supabase, не публикуя их наружу.
 - `src/max-engagement/safety.ts` - решение, можно ли отвечать и с каким уровнем подкола.
 - `src/max-engagement/content-safety.ts` - стоп-триггеры, вопросы и базовая классификация текста.
 - `src/max-engagement/repository.ts` - доступ к таблицам Supabase.
+- `docs/max-api-notes.md` - заметки по реальному MAX API из портала и официальной документации.
 - `src/worker.ts` - dry-run worker для обработки новых комментариев.
 - `docker-compose.timeweb.yml` - изолированный запуск worker-контейнера в Timeweb.
 - `docs/timeweb-deploy.md` - правила размещения без вмешательства в DecorRent.
@@ -36,6 +37,10 @@ SUPABASE_SECRET_KEY=your-service-role-or-secret-key
 
 ```bash
 npm install
+npm run demo:reset
+npm run demo:sync
+npm run demo:admin
+npm run max:poll
 npm run seed:test
 npm run typecheck
 npm test
@@ -43,6 +48,44 @@ npm run dev:dry-run
 npm run sync:max
 npm run admin:local
 ```
+
+## Локальный demo-режим без Supabase и GitHub
+
+Этот режим нужен, когда нет входа в Supabase/GitHub или нельзя трогать внешние
+подключения. Он хранит данные в `.local-data/max-engagement-demo.json`, не
+публикует комментарии и не использует реальные MAX-токены.
+
+```bash
+npm run demo:reset
+npm run demo:sync
+npm run demo:admin
+```
+
+- `demo:reset` создает демо-каналы, посты, комментарии и примеры стиля.
+- `demo:sync` запускает mock MAX adapter и dry-run worker поверх локального JSON.
+- `demo:admin` открывает локальную панель на `http://127.0.0.1:4317`.
+
+В demo-панели можно смотреть черновики, фильтровать подколы и уровень 3,
+одобрять/пропускать действия, останавливать тред, менять базовые настройки
+канала, смотреть аналитику и добавлять примеры стиля. Это не заменяет Supabase,
+но позволяет показать и проверить продуктовую логику без внешних аккаунтов.
+
+## MAX polling для разработки
+
+`npm run max:poll` читает реальные события MAX через `GET /updates`, импортирует
+их в локальное JSON-хранилище, затем запускает dry-run worker. Команда ничего не
+публикует наружу.
+
+Требования:
+
+- `MAX_API_BASE_URL=https://platform-api2.max.ru`;
+- `MAX_API_TOKEN` в `.env.local`;
+- бот добавлен в нужный канал/чат как администратор;
+- на машине настроено доверие TLS-сертификатам MAX.
+
+Если команда падает с `unable to get local issuer certificate`, нужно настроить
+доверенную цепочку сертификатов на ПК или запускать polling на сервере, где
+сертификаты MAX проходят проверку. Не отключайте TLS-проверку с реальным токеном.
 
 `npm run dev:dry-run` делает один проход:
 

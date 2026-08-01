@@ -3,7 +3,7 @@ import { config as loadDotenv } from "dotenv";
 
 import { hasStopTrigger, looksLikeQuestion } from "./max-engagement/content-safety.js";
 import { generateDryRunDraft } from "./max-engagement/draft-generator.js";
-import { MaxEngagementRepository, createSupabaseClientFromEnv } from "./max-engagement/repository.js";
+import { MaxEngagementRepository, createSupabaseClientFromEnv, type EngagementRepository } from "./max-engagement/repository.js";
 import { decideEngagementAction } from "./max-engagement/safety.js";
 import type {
   MaxEngagementChannelRecord,
@@ -25,7 +25,7 @@ type WorkerResult = {
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
-export async function runDryRunWorker(repository = new MaxEngagementRepository(createSupabaseClientFromEnv())): Promise<WorkerResult> {
+export async function runDryRunWorker(repository: EngagementRepository = new MaxEngagementRepository(createSupabaseClientFromEnv())): Promise<WorkerResult> {
   const channels = await repository.listRunnableChannels();
   const result: WorkerResult = {
     channels: channels.length,
@@ -52,7 +52,7 @@ export async function runDryRunWorker(repository = new MaxEngagementRepository(c
 }
 
 async function processComment(
-  repository: MaxEngagementRepository,
+  repository: EngagementRepository,
   channel: MaxEngagementChannelRecord,
   comment: MaxEngagementCommentRecord
 ): Promise<boolean> {
