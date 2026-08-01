@@ -91,6 +91,17 @@ type ChannelSettings = {
   dry_run: boolean;
 };
 
+type StyleExample = {
+  id: string;
+  channel_id: string | null;
+  example_type: "admin_message" | "good_tease" | "too_much";
+  source_type: "manual" | "txt" | "csv" | "json" | "screenshot" | "max" | "telegram" | "whatsapp" | "vk";
+  text: string;
+  notes: string | null;
+  created_at: string;
+  channel_title?: string | null;
+};
+
 const server = createServer(async (req, res) => {
   try {
     if (!req.url || !req.method) {
@@ -120,6 +131,23 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/api/channels") {
       sendJson(res, 200, await listChannels());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/style-examples") {
+      sendJson(res, 200, await listStyleExamples(url.searchParams.get("channelId")));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/style-examples") {
+      sendJson(res, 200, await createStyleExamples(await readJson(req)));
+      return;
+    }
+
+    const styleExampleMatch = url.pathname.match(/^\/api\/style-examples\/([0-9a-f-]+)$/);
+    if (req.method === "DELETE" && styleExampleMatch) {
+      const [, id] = styleExampleMatch;
+      sendJson(res, 200, await deleteStyleExample(id));
       return;
     }
 
@@ -456,6 +484,77 @@ async function updateChannel(id: string, body: unknown): Promise<{ ok: true }> {
   return { ok: true };
 }
 
+async function listStyleExamples(channelId: string | null): Promise<{ examples: StyleExample[] }> {
+  let query = supabase
+    .from("max_engagement_style_examples")
+    .select("id, channel_id, example_type, source_type, text, notes, created_at")
+    .order("created_at", { ascending: false })
+    .limit(200);
+
+  if (channelId && channelId !== "all") {
+    query = query.eq("channel_id", channelId);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw error;
+  }
+
+  const rows = (data ?? []) as StyleExample[];
+  const channels = await fetchByIds("max_engagement_channels", rows.map((row) => row.channel_id).filter(isString), "id,title");
+
+  return {
+    examples: rows.map((row) => ({
+      ...row,
+      channel_title: row.channel_id ? getText(channels.get(row.channel_id), "title") : null
+    }))
+  };
+}
+
+async function createStyleExamples(body: unknown): Promise<{ ok: true; inserted: number }> {
+  const input = body as Record<string, unknown>;
+  const channelId = optionalString(input.channel_id);
+  const exampleType = enumString(input.example_type, ["admin_message", "good_tease", "too_much"], "example_type");
+  const sourceType = enumString(
+    input.source_type,
+    ["manual", "txt", "csv", "json", "screenshot", "max", "telegram", "whatsapp", "vk"],
+    "source_type"
+  );
+  const notes = optionalString(input.notes);
+  const values = Array.isArray(input.texts) ? input.texts : [input.text];
+  const rows = values
+    .map((value) => (typeof value === "string" ? value.trim() : ""))
+    .filter((text) => text.length > 0)
+    .slice(0, 100)
+    .map((text) => ({
+      channel_id: channelId,
+      example_type: exampleType,
+      source_type: sourceType,
+      text,
+      notes
+    }));
+
+  if (rows.length === 0) {
+    throw new HttpError(400, "Нужно добавить хотя бы один текстовый пример");
+  }
+
+  const { error } = await supabase.from("max_engagement_style_examples").insert(rows);
+  if (error) {
+    throw error;
+  }
+
+  return { ok: true, inserted: rows.length };
+}
+
+async function deleteStyleExample(id: string): Promise<{ ok: true }> {
+  const { error } = await supabase.from("max_engagement_style_examples").delete().eq("id", id);
+  if (error) {
+    throw error;
+  }
+
+  return { ok: true };
+}
+
 function sendHtml(res: ServerResponse, html: string): void {
   res.writeHead(200, {
     "content-type": "text/html; charset=utf-8",
@@ -769,6 +868,13 @@ function renderDashboard(): string {
       padding: 10px;
     }
 
+    .split {
+      display: grid;
+      grid-template-columns: minmax(280px, 390px) minmax(0, 1fr);
+      gap: 12px;
+      align-items: start;
+    }
+
     .item {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -863,6 +969,7 @@ function renderDashboard(): string {
       .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .form-grid { grid-template-columns: 1fr; }
       .field.wide, .field.full { grid-column: 1; }
+      .split { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -878,6 +985,7 @@ function renderDashboard(): string {
       <button class="tab" data-view="level3">Только уровень 3</button>
       <button class="tab" data-view="analytics">Аналитика</button>
       <button class="tab" data-view="settings">Настройки каналов</button>
+      <button class="tab" data-view="style">Стиль</button>
     </nav>
     <div class="toolbar">
       <div class="status" id="status">Загрузка...</div>
@@ -921,6 +1029,17 @@ function renderDashboard(): string {
           status.textContent = payload.channels.length
             ? "Каналов: " + payload.channels.length
             : "Нет подключенных каналов";
+        } else if (currentView === "style") {
+          const [channelsResponse, examplesResponse] = await Promise.all([
+            fetch("/api/channels"),
+            fetch("/api/style-examples")
+          ]);
+          const channelsPayload = await channelsResponse.json();
+          const examplesPayload = await examplesResponse.json();
+          if (!channelsResponse.ok) throw new Error(channelsPayload.error || "Ошибка загрузки каналов");
+          if (!examplesResponse.ok) throw new Error(examplesPayload.error || "Ошибка загрузки примеров");
+          renderStyle(channelsPayload.channels || [], examplesPayload.examples || []);
+          status.textContent = "Примеров стиля: " + (examplesPayload.examples || []).length;
         } else {
           const query = currentView === "level3" ? "?view=teases&level=3" : "?view=" + currentView;
           const response = await fetch("/api/actions" + query);
@@ -1017,6 +1136,91 @@ function renderDashboard(): string {
           </div>
         </form>
       \`).join("") + '</div>';
+    }
+
+    function renderStyle(channels, examples) {
+      metrics.hidden = true;
+      metrics.innerHTML = "";
+
+      const channelOptions = channels.map((channel) =>
+        \`<option value="\${escapeHtml(channel.id)}">\${escapeHtml(channel.title)}</option>\`
+      ).join("");
+
+      list.innerHTML = \`
+        <div class="split">
+          <form class="settings-form" onsubmit="saveStyleExamples(event)">
+            <div class="item-head" style="padding: 0 0 12px; border-bottom: 1px solid var(--line);">
+              <div>
+                <strong>Примеры стиля</strong>
+                <div class="meta">
+                  <span class="badge">admin_message</span>
+                  <span class="badge">good_tease</span>
+                  <span class="badge">too_much</span>
+                </div>
+              </div>
+              <div class="actions">
+                <button class="primary" type="submit">Добавить</button>
+              </div>
+            </div>
+            <div class="form-grid" style="grid-template-columns: 1fr;">
+              <div class="field">
+                <label>Канал</label>
+                <select name="channel_id">\${channelOptions}</select>
+              </div>
+              \${selectField("Тип примера", "example_type", "admin_message", [
+                ["admin_message", "сообщение администратора"],
+                ["good_tease", "удачный подкол"],
+                ["too_much", "перебор"]
+              ])}
+              \${selectField("Источник", "source_type", "manual", [
+                ["manual", "ручной ввод"],
+                ["txt", ".txt"],
+                ["csv", ".csv"],
+                ["json", ".json"],
+                ["max", "MAX"],
+                ["telegram", "Telegram"],
+                ["whatsapp", "WhatsApp"],
+                ["vk", "VK"]
+              ])}
+              <div class="field">
+                <label>Файл .txt/.csv/.json</label>
+                <input name="style_file" type="file" accept=".txt,.csv,.json,text/plain,application/json,text/csv">
+              </div>
+              <div class="field">
+                <label>Тексты</label>
+                <textarea name="text" placeholder="Один пример на абзац или строку"></textarea>
+              </div>
+              <div class="field">
+                <label>Заметка</label>
+                <input name="notes" type="text" placeholder="Например: тон мягкий, без перехода на личности">
+              </div>
+            </div>
+          </form>
+          <section class="list">
+            \${examples.length ? examples.map((example) => \`
+              <article class="item">
+                <div class="item-head">
+                  <div>
+                    <strong>\${escapeHtml(example.channel_title || "Канал")}</strong>
+                    <div class="meta">
+                      <span class="badge">\${escapeHtml(example.example_type)}</span>
+                      <span class="badge">\${escapeHtml(example.source_type)}</span>
+                      <span class="badge">\${new Date(example.created_at).toLocaleString()}</span>
+                    </div>
+                  </div>
+                  <div class="actions">
+                    <button class="danger" onclick="deleteStyleExample('\${example.id}')">Удалить</button>
+                  </div>
+                </div>
+                <div class="cell">
+                  <div class="text">\${escapeHtml(example.text)}</div>
+                  \${example.notes ? \`<div class="label" style="margin-top: 12px;">Заметка</div><div class="text">\${escapeHtml(example.notes)}</div>\` : ""}
+                </div>
+              </article>
+            \`).join("") : '<div class="empty">Примеры пока не загружены.</div>'}
+          </section>
+        </div>
+      \`;
     }
 
     function renderActions(actions) {
@@ -1168,6 +1372,59 @@ function renderDashboard(): string {
       await load();
     }
 
+    async function saveStyleExamples(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = new FormData(form);
+      const file = data.get("style_file");
+      const manualText = String(data.get("text") || "");
+      let texts = splitExamples(manualText);
+      let sourceType = String(data.get("source_type") || "manual");
+
+      if (file && file.size) {
+        const fileText = await file.text();
+        sourceType = sourceType === "manual" ? detectSourceType(file.name) : sourceType;
+        texts = texts.concat(parseExamplesFromFile(file.name, fileText));
+      }
+
+      texts = Array.from(new Set(texts.map((text) => text.trim()).filter(Boolean))).slice(0, 100);
+      if (!texts.length) {
+        status.textContent = "Добавьте текст или файл с примерами";
+        return;
+      }
+
+      status.textContent = "Сохраняю примеры...";
+      const response = await fetch("/api/style-examples", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          channel_id: data.get("channel_id"),
+          example_type: data.get("example_type"),
+          source_type: sourceType,
+          notes: data.get("notes"),
+          texts
+        })
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        status.textContent = payload.error || "Ошибка сохранения";
+        return;
+      }
+      form.reset();
+      await load();
+    }
+
+    async function deleteStyleExample(id) {
+      status.textContent = "Удаляю пример...";
+      const response = await fetch("/api/style-examples/" + id, { method: "DELETE" });
+      const payload = await response.json();
+      if (!response.ok) {
+        status.textContent = payload.error || "Ошибка удаления";
+        return;
+      }
+      await load();
+    }
+
     function escapeHtml(value) {
       return String(value)
         .replaceAll("&", "&amp;")
@@ -1210,6 +1467,47 @@ function renderDashboard(): string {
     function normalizeTime(value) {
       if (!value) return "";
       return String(value).slice(0, 5);
+    }
+
+    function splitExamples(value) {
+      return String(value)
+        .split(/\\n\\s*\\n|\\r?\\n/)
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+
+    function detectSourceType(fileName) {
+      const name = String(fileName).toLowerCase();
+      if (name.endsWith(".json")) return "json";
+      if (name.endsWith(".csv")) return "csv";
+      if (name.endsWith(".txt")) return "txt";
+      return "manual";
+    }
+
+    function parseExamplesFromFile(fileName, content) {
+      const sourceType = detectSourceType(fileName);
+      if (sourceType === "json") {
+        try {
+          const parsed = JSON.parse(content);
+          if (Array.isArray(parsed)) {
+            return parsed.map((item) => typeof item === "string" ? item : item?.text).filter(Boolean);
+          }
+          if (Array.isArray(parsed.examples)) {
+            return parsed.examples.map((item) => typeof item === "string" ? item : item?.text).filter(Boolean);
+          }
+        } catch {
+          return splitExamples(content);
+        }
+      }
+
+      if (sourceType === "csv") {
+        return content
+          .split(/\\r?\\n/)
+          .map((line) => line.split(",").map((cell) => cell.trim().replace(/^"|"$/g, "")).find(Boolean) || "")
+          .filter(Boolean);
+      }
+
+      return splitExamples(content);
     }
   </script>
 </body>
