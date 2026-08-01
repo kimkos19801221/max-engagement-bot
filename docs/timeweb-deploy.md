@@ -1,7 +1,6 @@
 # Timeweb Cloud deployment
 
-Главное правило: бот размещается отдельно от DecorRent. Нельзя менять рабочую
-инфраструктуру DecorRent без отдельного подтверждения владельца.
+Главное правило: проект MAX engagement bot размещается отдельно от DecorRent. Без отдельного подтверждения владельца нельзя менять рабочую инфраструктуру DecorRent.
 
 ## Что не трогаем
 
@@ -16,33 +15,56 @@
 - процессы PM2 DecorRent;
 - GitHub Actions и автоматический деплой DecorRent.
 
-## Изолированный вариант запуска
+## Изолированный запуск
 
-Бот запускается как отдельный worker-контейнер без публикации портов наружу:
-
-```bash
-cp .env.timeweb.example .env.timeweb
-docker compose -f docker-compose.timeweb.yml up -d --build
-```
-
-Имена изолированных ресурсов:
+Compose-файл проекта использует отдельные имена:
 
 - compose project: `max-engagement-bot`;
-- container: `max-engagement-bot-worker`;
+- worker container: `max-engagement-bot-worker`;
+- web container: `max-engagement-bot-web`;
 - network: `max-engagement-bot-net`;
 - env file: `.env.timeweb`.
 
-Такой запуск не требует Nginx, домена и открытых портов, потому что бот работает
-как фоновый обработчик Supabase/MAX.
+Запуск:
 
-## Когда нужно сначала написать владельцу
+```bash
+cp .env.example .env.timeweb
+docker compose -f docker-compose.timeweb.yml up -d --build
+```
 
-Перед любым из этих действий нужно остановиться и запросить подтверждение:
+`worker` запускает dry-run обработчик по расписанию.
 
-- изменение общей Nginx-конфигурации сервера;
-- публикация нового порта наружу;
-- подключение домена или поддомена;
-- изменение PM2;
-- изменение GitHub Actions;
-- изменение существующих Docker networks или compose-файлов DecorRent;
-- использование базы данных или Supabase-проекта DecorRent.
+`web` запускает админку и MAX webhook endpoint внутри Docker-сети на `4317`, но не публикует порт наружу. Это сделано специально, чтобы не менять общую сетевую конфигурацию сервера без согласования.
+
+## Обязательные переменные
+
+- `SUPABASE_URL`;
+- `SUPABASE_SECRET_KEY` или `SUPABASE_SERVICE_ROLE_KEY`;
+- `MAX_API_BASE_URL=https://platform-api2.max.ru`;
+- `MAX_API_TOKEN`;
+- `MAX_WEBHOOK_SECRET`;
+- `ADMIN_SECRET`.
+
+`ADMIN_SECRET` защищает админку через HTTP Basic или `Authorization: Bearer <secret>`.
+
+`MAX_WEBHOOK_SECRET` должен совпадать с secret в MAX webhook subscription. Сервер проверяет заголовок `X-Max-Bot-Api-Secret`.
+
+## Webhook
+
+Локальный endpoint приложения:
+
+```text
+POST /webhooks/max
+```
+
+MAX production webhook должен быть доступен по HTTPS на 443 порту. Если для этого нужно добавить домен, reverse proxy, Nginx location, TLS-сертификат или проброс порта на сервере, сначала нужно согласование, потому что это уже общая инфраструктура.
+
+## Боевой переключатель
+
+До финального включения все каналы должны оставаться с `dry_run=true`. Реальная публикация комментариев включается отдельно, после проверки:
+
+- webhook принимает события;
+- Supabase пишет посты и комментарии;
+- worker создаёт draft/queued actions;
+- админка защищена `ADMIN_SECRET`;
+- тестовый канал проверен отдельно от основного канала.

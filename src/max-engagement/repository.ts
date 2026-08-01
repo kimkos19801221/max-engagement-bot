@@ -11,6 +11,7 @@ import type {
   MaxEngagementThreadStatus,
   MaxApiComment,
   MaxApiPost,
+  MaxUpdate,
   MaxEngagementTone,
   TeasingLevel
 } from "./types.js";
@@ -45,6 +46,14 @@ export type EngagementRepository = {
   createBotAction(input: BotActionInput): Promise<void>;
 };
 
+export type MaxUpdatesImportResult = {
+  received: number;
+  imported: number;
+  channels: number;
+  messages: number;
+  skipped: number;
+};
+
 export function createSupabaseClientFromEnv(): SupabaseClient {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_PUBLISHABLE_KEY;
@@ -65,6 +74,36 @@ export function createSupabaseClientFromEnv(): SupabaseClient {
 
 export class MaxEngagementRepository {
   constructor(private readonly supabase: SupabaseClient) {}
+
+  async importMaxUpdates(updates: MaxUpdate[]): Promise<MaxUpdatesImportResult> {
+    const result: MaxUpdatesImportResult = {
+      received: updates.length,
+      imported: 0,
+      channels: 0,
+      messages: 0,
+      skipped: 0
+    };
+
+    for (const update of updates) {
+      const channel = await this.upsertChannelFromUpdate(update);
+      if (channel.created) {
+        result.channels += 1;
+      }
+
+      if (update.update_type === "message_created" && update.message && channel.record) {
+        const imported = await this.importMessageCreatedUpdate(channel.record, update);
+        if (imported) {
+          result.messages += 1;
+        } else {
+          result.skipped += 1;
+        }
+      }
+
+      result.imported += 1;
+    }
+
+    return result;
+  }
 
   async listRunnableChannels(limit = 25): Promise<MaxEngagementChannelRecord[]> {
     const { data, error } = await this.supabase
@@ -327,6 +366,107 @@ export class MaxEngagementRepository {
     return mapComment(data as CommentRow);
   }
 
+  private async upsertChannelFromUpdate(update: MaxUpdate): Promise<{
+    record: MaxEngagementChannelRecord | null;
+    created: boolean;
+  }> {
+    const chatId = update.chat_id ?? update.message?.recipient?.chat_id;
+    if (chatId === undefined || chatId === null) {
+      return { record: null, created: false };
+    }
+
+    const maxChannelId = String(chatId);
+    const { data: existing, error: existingError } = await this.supabase
+      .from("max_engagement_channels")
+      .select("*")
+      .eq("max_channel_id", maxChannelId)
+      .maybeSingle();
+
+    if (existingError) {
+      throw existingError;
+    }
+
+    if (existing) {
+      return { record: mapChannel(existing as ChannelRow), created: false };
+    }
+
+    const { data, error } = await this.supabase
+      .from("max_engagement_channels")
+      .insert({
+        max_channel_id: maxChannelId,
+        title: update.is_channel ? `MAX канал ${maxChannelId}` : `MAX чат ${maxChannelId}`,
+        channel_kind: "news",
+        enabled: false,
+        mode: "off",
+        teasing_level: 1,
+        politics_teasing_level: 0,
+        bot_name: "MAX Bot",
+        bot_signature: "- админ",
+        dry_run: true
+      })
+      .select("*")
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    return { record: mapChannel(data as ChannelRow), created: true };
+  }
+
+  private async importMessageCreatedUpdate(channel: MaxEngagementChannelRecord, update: MaxUpdate): Promise<boolean> {
+    const message = update.message;
+    const text = message?.body?.text?.trim();
+    const messageId = message?.body?.mid;
+    if (!message || !messageId || !text) {
+      return false;
+    }
+
+    const senderId = message.sender?.user_id;
+    const senderName = message.sender?.name || message.sender?.username || null;
+    const postedAt = typeof message.timestamp === "number"
+      ? new Date(message.timestamp).toISOString()
+      : new Date(update.timestamp ?? Date.now()).toISOString();
+    const linkedMessageId = message.link?.mid ?? message.link?.message?.body?.mid ?? null;
+
+    if (!linkedMessageId) {
+      const post = await this.upsertMaxPost(channel, {
+        id: String(messageId),
+        channelId: channel.maxChannelId,
+        text,
+        url: message.url ?? undefined,
+        authorName: senderName ?? undefined,
+        postedAt,
+        commentsCount: message.stat?.comments ?? 0,
+        reactionsCount: message.stat?.reactions ?? message.stat?.likes
+      });
+      await this.upsertMaxThread(channel.id, post.id, String(messageId));
+      return true;
+    }
+
+    const post = await this.upsertMaxPost(channel, {
+      id: String(linkedMessageId),
+      channelId: channel.maxChannelId,
+      text: message.link?.message?.body?.text ?? "MAX post from linked message",
+      url: message.url ?? undefined,
+      authorName: message.link?.sender?.name ?? undefined,
+      postedAt,
+      commentsCount: nullToUndefined(message.stat?.comments),
+      reactionsCount: nullToUndefined(message.stat?.reactions ?? message.stat?.likes)
+    });
+    const thread = await this.upsertMaxThread(channel.id, post.id, String(linkedMessageId));
+    await this.upsertMaxComment(channel.id, post.id, thread.id, {
+      id: String(messageId),
+      postId: String(linkedMessageId),
+      threadId: String(linkedMessageId),
+      authorUserId: senderId === undefined || senderId === null ? undefined : String(senderId),
+      authorName: senderName ?? undefined,
+      text,
+      postedAt
+    });
+    return true;
+  }
+
   private async listProcessedTriggerIds(triggerIds: string[]): Promise<Set<string>> {
     const { data, error } = await this.supabase
       .from("max_engagement_bot_actions")
@@ -415,4 +555,8 @@ function toTeasingLevel(value: unknown): TeasingLevel {
     return 1;
   }
   return 0;
+}
+
+function nullToUndefined(value: number | null | undefined): number | undefined {
+  return typeof value === "number" ? value : undefined;
 }

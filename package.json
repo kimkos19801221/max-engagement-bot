@@ -14,6 +14,7 @@
     "max:verify": "tsx src/max-verify.ts",
     "seed:test": "tsx src/seed-test-data.ts",
     "start": "tsx src/worker.ts --loop",
+    "web": "tsx src/admin-server.ts",
     "sync:max": "tsx src/sync-max.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"

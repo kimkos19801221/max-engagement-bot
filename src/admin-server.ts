@@ -1,13 +1,19 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { config as loadDotenv } from "dotenv";
 
-import { createSupabaseClientFromEnv } from "./max-engagement/repository.js";
+import { createSupabaseClientFromEnv, MaxEngagementRepository } from "./max-engagement/repository.js";
+import { runDryRunWorker } from "./worker.js";
+import type { MaxUpdate } from "./max-engagement/types.js";
 
 loadDotenv({ path: ".env.local", override: false });
 
 const host = process.env.ADMIN_HOST || "127.0.0.1";
 const port = Number(process.env.ADMIN_PORT || 4317);
 const supabase = createSupabaseClientFromEnv();
+const repository = new MaxEngagementRepository(supabase);
+const adminSecret = process.env.ADMIN_SECRET;
+const webhookSecret = process.env.MAX_WEBHOOK_SECRET;
 
 type DraftAction = {
   id: string;
@@ -111,6 +117,21 @@ const server = createServer(async (req, res) => {
 
     const url = new URL(req.url, `http://${host}:${port}`);
 
+    if (req.method === "GET" && url.pathname === "/healthz") {
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/webhooks/max") {
+      await handleMaxWebhook(req, res);
+      return;
+    }
+
+    if (!isAdminAuthorized(req)) {
+      sendUnauthorized(res);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/") {
       sendHtml(res, renderDashboard());
       return;
@@ -175,6 +196,30 @@ const server = createServer(async (req, res) => {
 server.listen(port, host, () => {
   console.log(`MAX engagement admin: http://${host}:${port}`);
 });
+
+async function handleMaxWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!webhookSecret) {
+    sendJson(res, 503, { error: "MAX_WEBHOOK_SECRET is required" });
+    return;
+  }
+
+  if (!safeEqual(getHeaderValue(req, "x-max-bot-api-secret"), webhookSecret)) {
+    sendJson(res, 401, { error: "Invalid MAX webhook secret" });
+    return;
+  }
+
+  const updates = extractWebhookUpdates(await readJson(req));
+  const imported = await repository.importMaxUpdates(updates);
+  sendJson(res, 200, { ok: true, imported });
+
+  void runDryRunWorker(repository)
+    .then((worker) => {
+      console.log(JSON.stringify({ at: new Date().toISOString(), source: "max-webhook", imported, worker }));
+    })
+    .catch((error: unknown) => {
+      console.error(error instanceof Error ? error.message : error);
+    });
+}
 
 async function listDraftActions(filters: { view: string | null; level: string | null } = { view: null, level: null }): Promise<{ actions: DraftAction[] }> {
   let query = supabase
@@ -571,6 +616,15 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
   res.end(JSON.stringify(value));
 }
 
+function sendUnauthorized(res: ServerResponse): void {
+  res.writeHead(401, {
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+    "www-authenticate": 'Basic realm="MAX engagement admin"'
+  });
+  res.end(JSON.stringify({ error: "Unauthorized" }));
+}
+
 function isString(value: string | null | undefined): value is string {
   return typeof value === "string";
 }
@@ -595,6 +649,73 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
   }
 
   return JSON.parse(raw);
+}
+
+function extractWebhookUpdates(body: unknown): MaxUpdate[] {
+  if (Array.isArray(body)) {
+    return body.filter(isMaxUpdate);
+  }
+
+  if (isRecord(body)) {
+    if (Array.isArray(body.updates)) {
+      return body.updates.filter(isMaxUpdate);
+    }
+
+    if (isMaxUpdate(body)) {
+      return [body];
+    }
+  }
+
+  throw new HttpError(400, "MAX webhook payload does not contain updates");
+}
+
+function isMaxUpdate(value: unknown): value is MaxUpdate {
+  return isRecord(value) && typeof value.update_type === "string";
+}
+
+function isAdminAuthorized(req: IncomingMessage): boolean {
+  if (!adminSecret) {
+    return true;
+  }
+
+  const authorization = getHeaderValue(req, "authorization");
+  if (!authorization) {
+    return false;
+  }
+
+  if (authorization.startsWith("Bearer ")) {
+    return safeEqual(authorization.slice("Bearer ".length).trim(), adminSecret);
+  }
+
+  if (authorization.startsWith("Basic ")) {
+    const decoded = Buffer.from(authorization.slice("Basic ".length), "base64").toString("utf8");
+    const password = decoded.includes(":") ? decoded.slice(decoded.indexOf(":") + 1) : decoded;
+    return safeEqual(password, adminSecret);
+  }
+
+  return false;
+}
+
+function getHeaderValue(req: IncomingMessage, name: string): string | null {
+  const value = req.headers[name.toLowerCase()];
+  if (Array.isArray(value)) {
+    return value[0] ?? null;
+  }
+  return typeof value === "string" ? value : null;
+}
+
+function safeEqual(left: string | null | undefined, right: string): boolean {
+  if (!left) {
+    return false;
+  }
+
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 class HttpError extends Error {
