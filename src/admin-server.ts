@@ -117,12 +117,12 @@ const server = createServer(async (req, res) => {
 
     const url = new URL(req.url, `http://${host}:${port}`);
 
-    if (req.method === "GET" && url.pathname === "/healthz") {
+    if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/healthz") {
       sendJson(res, 200, { ok: true });
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/") {
+    if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/") {
       sendJson(res, 200, { ok: true, service: "max-engagement-bot" });
       return;
     }
