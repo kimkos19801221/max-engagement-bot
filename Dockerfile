@@ -9,9 +9,13 @@ FROM node:22-alpine AS runner
 
 WORKDIR /app
 ENV NODE_ENV=production
+ENV ADMIN_HOST=0.0.0.0
+ENV ADMIN_PORT=4317
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json package-lock.json tsconfig.json ./
 COPY src ./src
 
-CMD ["npm", "start"]
+EXPOSE 4317
+
+CMD ["npm", "run", "web"]
