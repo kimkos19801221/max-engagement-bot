@@ -19,6 +19,6 @@ COPY src ./src
 EXPOSE 4317
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=8 \
-  CMD wget -qO- http://127.0.0.1:4317/healthz || exit 1
+  CMD node -e "fetch('http://127.0.0.1:4317/healthz').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"
 
 CMD ["npm", "run", "web"]
