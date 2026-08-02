@@ -118,7 +118,7 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://${host}:${port}`);
 
     if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/healthz") {
-      sendJson(res, 200, { ok: true });
+      sendHealth(res, req.method);
       return;
     }
 
@@ -619,6 +619,16 @@ function sendJson(res: ServerResponse, status: number, value: unknown): void {
     "cache-control": "no-store"
   });
   res.end(JSON.stringify(value));
+}
+
+function sendHealth(res: ServerResponse, method: string): void {
+  res.writeHead(200, {
+    "content-type": "text/plain; charset=utf-8",
+    "cache-control": "no-store",
+    "content-length": "2",
+    "connection": "close"
+  });
+  res.end(method === "HEAD" ? undefined : "ok");
 }
 
 function sendUnauthorized(res: ServerResponse): void {
