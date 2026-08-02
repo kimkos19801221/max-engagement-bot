@@ -122,6 +122,11 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/") {
+      sendJson(res, 200, { ok: true, service: "max-engagement-bot" });
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/webhooks/max") {
       await handleMaxWebhook(req, res);
       return;
@@ -132,7 +137,7 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if (req.method === "GET" && url.pathname === "/") {
+    if (req.method === "GET" && url.pathname === "/admin") {
       sendHtml(res, renderDashboard());
       return;
     }
