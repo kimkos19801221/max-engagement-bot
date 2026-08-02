@@ -118,6 +118,13 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, `http://${host}:${port}`);
 
     if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/healthz") {
+      console.log(JSON.stringify({
+        at: new Date().toISOString(),
+        method: req.method,
+        path: url.pathname,
+        source: "healthcheck",
+        remoteAddress: req.socket.remoteAddress
+      }));
       sendHealth(res, req.method);
       return;
     }
