@@ -65,6 +65,38 @@ describe("LocalEngagementRepository MAX update import", () => {
     expect(importedComments).toHaveLength(1);
     expect(importedComments[0].authorName).toBe("Игорь");
   });
+  it("imports ordinary chat messages separately from channel posts", async () => {
+    const repository = await createTempRepository();
+    await repository.resetDemoData();
+    const chatId = -77530014631231;
+
+    const result = await repository.importMaxUpdates([{
+      update_type: "message_created",
+      timestamp: 1_800_000_100_000,
+      chat_id: chatId,
+      message: {
+        sender: { user_id: 777, first_name: "Анна", is_bot: false },
+        recipient: { chat_id: chatId, chat_type: "chat" },
+        timestamp: 1_800_000_100_000,
+        body: { mid: "chat-mid-1", text: "Алина, где найти детского стоматолога?" }
+      }
+    }]);
+
+    const data = await repository.read();
+    const importedChannel = data.channels.find((channel) => channel.maxChannelId === String(chatId));
+    const messages = await repository.listUnprocessedChatMessages(importedChannel!.id);
+
+    expect(result.messages).toBe(1);
+    expect(importedChannel?.communityType).toBe("chat");
+    expect(importedChannel?.mode).toBe("city_assistant");
+    expect(data.posts.some((post) => post.maxPostId === "chat-mid-1")).toBe(false);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].authorName).toBe("Анна");
+
+    await repository.markChatMessageProcessed(messages[0].id);
+    expect(await repository.listUnprocessedChatMessages(importedChannel!.id)).toHaveLength(0);
+  });
+
 });
 
 async function createTempRepository(): Promise<LocalEngagementRepository> {

@@ -33,6 +33,13 @@ describe("MAX client contract", () => {
     expect(comments.length).toBeGreaterThan(0);
     expect(comments[0].postId).toBe(posts[0].id);
     expect(comments[0].threadId).toContain(posts[0].id);
+
+    const sent = await client.sendChatMessage({
+      chatId: "-123",
+      text: "Тестовый ответ",
+      replyToMessageId: "mid-1"
+    });
+    expect(sent.messageId).toContain("mock-chat:-123");
   });
 
   it("does not call the real MAX API without a token", async () => {

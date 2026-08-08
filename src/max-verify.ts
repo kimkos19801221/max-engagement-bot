@@ -1,10 +1,12 @@
 import "dotenv/config";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
+import { resolve } from "node:path";
 
 import { config as loadDotenv } from "dotenv";
 
-import { LocalEngagementRepository } from "./max-engagement/local-repository.js";
+import { createEngagementRepositoryFromEnv } from "./max-engagement/repository-factory.js";
 
 loadDotenv({ path: ".env.local", override: false });
 
@@ -30,10 +32,10 @@ type ApiResult<T> = {
   body: T | { code?: string; message?: string };
 };
 
-const repository = new LocalEngagementRepository();
+const repository = createEngagementRepositoryFromEnv();
 
 try {
-  const channels = (await repository.listChannels())
+  const channels = (await repository.listRunnableChannels())
     .filter((channel) => /^-?\d+$/.test(channel.maxChannelId));
 
   const verified = [];
@@ -64,7 +66,7 @@ async function getJson<T>(path: string): Promise<ApiResult<T>> {
   }
 
   const baseUrl = process.env.MAX_API_BASE_URL || "https://platform-api2.max.ru";
-  const caFile = process.env.MAX_API_CA_FILE;
+  const caFile = resolveCaFile();
   const ca = caFile ? await readFile(caFile, "utf8") : undefined;
   const url = new URL(path, baseUrl);
 
@@ -123,4 +125,14 @@ function sanitizeError(message: string): string {
   }
 
   return message.replaceAll(token, "[MAX_API_TOKEN]");
+}
+
+function resolveCaFile(): string | undefined {
+  const configured = process.env.MAX_API_CA_FILE;
+  if (configured && existsSync(configured)) {
+    return configured;
+  }
+
+  const fallback = resolve(".local-data/certs/max-api-ca-bundle.pem");
+  return existsSync(fallback) ? fallback : configured;
 }

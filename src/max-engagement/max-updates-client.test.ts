@@ -6,23 +6,33 @@ describe("MAX updates client", () => {
   it("requires token before polling updates", async () => {
     const client = new MaxUpdatesClient({});
 
-    await expect(client.getUpdates()).rejects.toThrow("MAX_API_TOKEN is required");
+    await expect(client.getUpdates()).rejects.toThrow(
+      "MAX_API_TOKEN is required"
+    );
   });
 
   it("calls GET /updates with marker and update types", async () => {
     const calls: string[] = [];
+
     const client = new MaxUpdatesClient({
       token: "secret-token",
       fetchFn: async (url, init) => {
         calls.push(String(url));
+
         expect(init?.headers?.Authorization).toBe("secret-token");
+
         return {
           ok: true,
           status: 200,
           async text() {
             return JSON.stringify({
               marker: 42,
-              updates: [{ update_type: "message_created", chat_id: 123 }]
+              updates: [
+                {
+                  update_type: "message_created",
+                  chat_id: 123
+                }
+              ]
             });
           }
         };
@@ -38,9 +48,13 @@ describe("MAX updates client", () => {
 
     expect(result.marker).toBe(42);
     expect(result.updates).toHaveLength(1);
-    expect(calls[0]).toContain("https://platform-api2.max.ru/updates");
+
+    expect(calls[0]).toContain(
+      "https://platform-api2.max.ru/updates"
+    );
     expect(calls[0]).toContain("marker=41");
-    expect(calls[0]).toContain("types=message_created");
-    expect(calls[0]).toContain("types=bot_added");
+    expect(calls[0]).toContain(
+      "types=message_created%2Cbot_added"
+    );
   });
 });

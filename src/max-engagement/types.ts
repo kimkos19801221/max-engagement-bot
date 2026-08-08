@@ -1,14 +1,21 @@
 export type MaxEngagementChannelKind = "moms" | "news";
 
+export type MaxCommunityType = "channel" | "chat";
+
 export type MaxEngagementMode =
   | "off"
   | "mentions_only"
   | "questions_only"
   | "suitable_messages"
   | "revive"
-  | "moderation_only";
+  | "moderation_only"
+  | "city_assistant";
 
-export type MaxEngagementTone = "friendly" | "neutral" | "official" | "conversational";
+export type MaxEngagementTone =
+  | "friendly"
+  | "neutral"
+  | "official"
+  | "conversational";
 
 export type MaxEngagementPostClassification =
   | "unknown"
@@ -29,7 +36,11 @@ export type MaxEngagementActionType =
   | "stop_thread"
   | "delete_own_comment";
 
-export type MaxEngagementThreadStatus = "active" | "stopped" | "muted" | "review_required";
+export type MaxEngagementThreadStatus =
+  | "active"
+  | "stopped"
+  | "muted"
+  | "review_required";
 
 export type TeasingLevel = 0 | 1 | 2 | 3;
 
@@ -44,6 +55,16 @@ export type MaxEngagementDecision = {
 
 export type MaxEngagementChannelSettings = {
   channelKind: MaxEngagementChannelKind;
+
+  /*
+   * Поле пока необязательное для совместимости со старыми
+   * локальными данными и текущими записями Supabase.
+   *
+   * Если значение отсутствует, старый код временно может
+   * считать сообщество каналом.
+   */
+  communityType?: MaxCommunityType;
+
   enabled: boolean;
   mode: MaxEngagementMode;
   teasingLevel: TeasingLevel;
@@ -57,14 +78,15 @@ export type MaxEngagementChannelSettings = {
   politicsTeasingLevel: TeasingLevel;
 };
 
-export type MaxEngagementChannelRecord = MaxEngagementChannelSettings & {
-  id: string;
-  maxChannelId: string;
-  title: string;
-  dryRun: boolean;
-  botName?: string;
-  botSignature?: string;
-};
+export type MaxEngagementChannelRecord =
+  MaxEngagementChannelSettings & {
+    id: string;
+    maxChannelId: string;
+    title: string;
+    dryRun: boolean;
+    botName?: string;
+    botSignature?: string;
+  };
 
 export type MaxEngagementPostContext = {
   classification: MaxEngagementPostClassification;
@@ -87,6 +109,7 @@ export type MaxEngagementPostRecord = {
   text: string | null;
   classification: MaxEngagementPostClassification;
   classificationConfidence: number;
+  postedAt?: string | null;
 };
 
 export type MaxEngagementThreadRecord = {
@@ -107,6 +130,44 @@ export type MaxEngagementCommentRecord = {
   authorName: string | null;
   text: string;
   postedAt: string | null;
+};
+
+/*
+ * Отдельная сущность обычного сообщения группового чата.
+ *
+ * Сообщение чата больше не должно автоматически становиться
+ * публикацией канала MaxEngagementPostRecord.
+ */
+export type MaxEngagementChatMessageRecord = {
+  id: string;
+
+  /*
+   * Здесь channelId означает внутренний ID сообщества
+   * в нашем проекте. Название сохраняется для совместимости.
+   */
+  channelId: string;
+
+  /*
+   * Настоящий mid сообщения MAX.
+   */
+  maxMessageId: string;
+
+  authorUserId: string | null;
+  authorName: string | null;
+  authorIsBot: boolean;
+
+  text: string;
+  postedAt: string | null;
+
+  /*
+   * mid сообщения, на которое отвечает участник.
+   */
+  replyToMaxMessageId: string | null;
+
+  /*
+   * После создания bot action сообщение считается обработанным.
+   */
+  processedAt?: string | null;
 };
 
 export type MaxEngagementGeneratedDraft = {
@@ -147,11 +208,41 @@ export type MaxPublishCommentResult = {
   commentId: string;
 };
 
+/*
+ * Отправка нового сообщения или ответа в обычный групповой чат.
+ */
+export type MaxSendChatMessageInput = {
+  chatId: string;
+  text: string;
+  replyToMessageId?: string | null;
+};
+
+export type MaxSendChatMessageResult = {
+  messageId: string;
+};
+
 export type MaxClient = {
-  fetchPosts(channel: MaxEngagementChannelRecord): Promise<MaxApiPost[]>;
-  fetchComments(channel: MaxEngagementChannelRecord, post: MaxApiPost): Promise<MaxApiComment[]>;
-  publishComment(input: MaxPublishCommentInput): Promise<MaxPublishCommentResult>;
-  deleteOwnComment(channelId: string, commentId: string): Promise<void>;
+  fetchPosts(
+    channel: MaxEngagementChannelRecord
+  ): Promise<MaxApiPost[]>;
+
+  fetchComments(
+    channel: MaxEngagementChannelRecord,
+    post: MaxApiPost
+  ): Promise<MaxApiComment[]>;
+
+  publishComment(
+    input: MaxPublishCommentInput
+  ): Promise<MaxPublishCommentResult>;
+
+  deleteOwnComment(
+    channelId: string,
+    commentId: string
+  ): Promise<void>;
+
+  sendChatMessage(
+    input: MaxSendChatMessageInput
+  ): Promise<MaxSendChatMessageResult>;
 };
 
 export type MaxUpdateType =
@@ -173,20 +264,38 @@ export type MaxUpdateType =
 
 export type MaxUpdateUser = {
   user_id?: number | string;
+
+  /*
+   * MAX может прислать либо name, либо first_name/last_name.
+   */
   name?: string;
+  first_name?: string;
+  last_name?: string;
+
   username?: string;
   is_bot?: boolean;
 };
 
+export type MaxUpdateRecipient = {
+  chat_id?: number | string;
+  user_id?: number | string;
+  id?: number | string;
+  type?: string;
+
+  /*
+   * Проверенное значение для обычного группового чата:
+   * chat_type: "chat"
+   */
+  chat_type?: "chat" | "channel" | string;
+};
+
 export type MaxUpdateMessage = {
   sender?: MaxUpdateUser;
-  recipient?: {
-    chat_id?: number | string;
-    user_id?: number | string;
-    id?: number | string;
-    type?: string;
-  };
+
+  recipient?: MaxUpdateRecipient;
+
   timestamp?: number;
+
   link?: {
     mid?: string;
     type?: string;
@@ -194,17 +303,20 @@ export type MaxUpdateMessage = {
     chat_id?: number | string;
     message?: MaxUpdateMessage;
   } | null;
+
   body?: {
     mid?: string;
     text?: string | null;
     attachments?: unknown[] | null;
   } | null;
+
   stat?: {
     views?: number;
     likes?: number;
     reactions?: number;
     comments?: number;
   } | null;
+
   url?: string | null;
 };
 
@@ -217,3 +329,62 @@ export type MaxUpdate = {
   message?: MaxUpdateMessage;
   payload?: string | null;
 };
+
+/*
+ * Определяет, является ли событие сообщением обычного чата.
+ */
+export function isMaxChatMessageUpdate(
+  update: MaxUpdate
+): boolean {
+  return (
+    update.update_type === "message_created" &&
+    update.message?.recipient?.chat_type === "chat"
+  );
+}
+
+/*
+ * Определяет, относится ли событие к каналу.
+ */
+export function isMaxChannelMessageUpdate(
+  update: MaxUpdate
+): boolean {
+  return (
+    update.update_type === "message_created" &&
+    (
+      update.is_channel === true ||
+      update.message?.recipient?.chat_type === "channel"
+    )
+  );
+}
+
+/*
+ * Собирает отображаемое имя участника из разных вариантов,
+ * которые может вернуть MAX API.
+ */
+export function getMaxUpdateUserName(
+  user: MaxUpdateUser | undefined
+): string | null {
+  if (!user) {
+    return null;
+  }
+
+  const directName = user.name?.trim();
+  if (directName) {
+    return directName;
+  }
+
+  const fullName = [
+    user.first_name?.trim(),
+    user.last_name?.trim()
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .trim();
+
+  if (fullName) {
+    return fullName;
+  }
+
+  const username = user.username?.trim();
+  return username || null;
+}

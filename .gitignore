@@ -7,3 +7,5 @@ coverage/
 *.tsbuildinfo
 *.log
 .local-data/
+.deploy/
+*.zip

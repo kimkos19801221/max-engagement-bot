@@ -1,5 +1,7 @@
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
+import { resolve } from "node:path";
 
 import type { MaxUpdate } from "./types.js";
 
@@ -8,43 +10,54 @@ export type MaxUpdatesResponse = {
   marker: number | null;
 };
 
-type FetchLike = (input: string | URL, init?: {
-  method?: string;
-  headers?: Record<string, string>;
-}) => Promise<{
+type FetchLike = (
+  input: string | URL,
+  init?: {
+    method?: string;
+    headers?: Record<string, string>;
+  }
+) => Promise<{
   ok: boolean;
   status: number;
   text(): Promise<string>;
 }>;
 
 export class MaxUpdatesClient {
-  constructor(private readonly config: {
-    baseUrl?: string;
-    caFile?: string;
-    token?: string;
-    fetchFn?: FetchLike;
-  }) {}
+  constructor(
+    private readonly config: {
+      baseUrl?: string;
+      caFile?: string;
+      token?: string;
+      fetchFn?: FetchLike;
+    }
+  ) {}
 
-  async getUpdates(input: {
-    marker?: number | null;
-    limit?: number;
-    timeout?: number;
-    types?: string[];
-  } = {}): Promise<MaxUpdatesResponse> {
+  async getUpdates(
+    input: {
+      marker?: number | null;
+      limit?: number;
+      timeout?: number;
+      types?: string[];
+    } = {}
+  ): Promise<MaxUpdatesResponse> {
     const token = this.config.token;
+
     if (!token) {
       throw new Error("MAX_API_TOKEN is required to poll MAX updates");
     }
 
     const baseUrl = this.config.baseUrl || "https://platform-api2.max.ru";
     const url = new URL("/updates", baseUrl);
+
     url.searchParams.set("limit", String(input.limit ?? 100));
     url.searchParams.set("timeout", String(input.timeout ?? 0));
+
     if (input.marker !== undefined && input.marker !== null) {
       url.searchParams.set("marker", String(input.marker));
     }
-    for (const type of input.types ?? []) {
-      url.searchParams.append("types", type);
+
+    if (input.types?.length) {
+      url.searchParams.set("types", input.types.join(","));
     }
 
     const response = this.config.fetchFn
@@ -55,13 +68,17 @@ export class MaxUpdatesClient {
           }
         })
       : await requestText(url, token, this.config.caFile);
+
     const text = await response.text();
 
     if (!response.ok) {
-      throw new Error(`MAX API GET /updates failed with ${response.status}: ${text}`);
+      throw new Error(
+        `MAX API GET /updates failed with ${response.status}: ${text}`
+      );
     }
 
     const payload = JSON.parse(text) as Partial<MaxUpdatesResponse>;
+
     return {
       updates: Array.isArray(payload.updates) ? payload.updates : [],
       marker: typeof payload.marker === "number" ? payload.marker : null
@@ -77,36 +94,64 @@ export function createMaxUpdatesClientFromEnv(): MaxUpdatesClient {
   });
 }
 
-async function requestText(url: URL, token: string, caFile?: string): Promise<{
+async function requestText(
+  url: URL,
+  token: string,
+  caFile?: string
+): Promise<{
   ok: boolean;
   status: number;
   text(): Promise<string>;
 }> {
-  const ca = caFile ? await readFile(caFile, "utf8") : undefined;
+  const resolvedCaFile = resolveCaFile(caFile);
+  const ca = resolvedCaFile
+    ? await readFile(resolvedCaFile, "utf8")
+    : undefined;
 
   return await new Promise((resolve, reject) => {
-    const req = httpsRequest(url, {
-      method: "GET",
-      headers: {
-        Authorization: token
+    const req = httpsRequest(
+      url,
+      {
+        method: "GET",
+        headers: {
+          Authorization: token
+        },
+        ca
       },
-      ca
-    }, (res) => {
-      const chunks: Buffer[] = [];
-      res.on("data", (chunk: Buffer) => chunks.push(chunk));
-      res.on("end", () => {
-        const body = Buffer.concat(chunks).toString("utf8");
-        resolve({
-          ok: Boolean(res.statusCode && res.statusCode >= 200 && res.statusCode < 300),
-          status: res.statusCode ?? 0,
-          async text() {
-            return body;
-          }
+      (res) => {
+        const chunks: Buffer[] = [];
+
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf8");
+
+          resolve({
+            ok: Boolean(
+              res.statusCode &&
+                res.statusCode >= 200 &&
+                res.statusCode < 300
+            ),
+            status: res.statusCode ?? 0,
+            async text() {
+              return body;
+            }
+          });
         });
-      });
-    });
+      }
+    );
 
     req.on("error", reject);
     req.end();
   });
+}
+
+function resolveCaFile(configured?: string): string | undefined {
+  if (configured && existsSync(configured)) {
+    return configured;
+  }
+
+  const fallback = resolve(".local-data/certs/max-api-ca-bundle.pem");
+
+  return existsSync(fallback) ? fallback : configured;
 }

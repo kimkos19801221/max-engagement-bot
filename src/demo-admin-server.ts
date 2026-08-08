@@ -16,7 +16,7 @@ const server = createServer(async (req, res) => {
 
     const url = new URL(req.url, `http://${host}:${port}`);
 
-    if (req.method === "GET" && url.pathname === "/") {
+    if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/admin")) {
       sendHtml(res, renderDashboard());
       return;
     }
@@ -39,6 +39,34 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/api/analytics") {
       sendJson(res, 200, await repository.analyticsSummary());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/city-memory") {
+      const data = await repository.read();
+      sendJson(res, 200, {
+        summary: await repository.cityMemorySummary(),
+        cities: data.cityMemory.cities,
+        publics: data.cityMemory.publics,
+        objects: data.cityMemory.objects,
+        knowledge: data.cityMemory.knowledge,
+        sources: data.cityMemory.sources,
+        revisions: data.cityMemory.revisions,
+        blockedItems: data.cityMemory.blockedItems,
+        channels: data.channels
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/city-memory/search") {
+      sendJson(res, 200, {
+        results: await repository.searchCityMemory({
+          cityName: url.searchParams.get("cityName"),
+          channelId: url.searchParams.get("channelId"),
+          query: url.searchParams.get("q") ?? "",
+          limit: 20
+        })
+      });
       return;
     }
 
@@ -90,7 +118,7 @@ const server = createServer(async (req, res) => {
       await repository.updateChannel(channelMatch[1], {
         enabled: Boolean(input.enabled),
         dryRun: Boolean(input.dryRun),
-        mode: enumValue<MaxEngagementMode>(input.mode, ["off", "mentions_only", "questions_only", "suitable_messages", "revive", "moderation_only"], "off"),
+        mode: enumValue<MaxEngagementMode>(input.mode, ["off", "mentions_only", "questions_only", "suitable_messages", "revive", "moderation_only", "city_assistant"], "off"),
         teasingLevel: toTeasingLevel(input.teasingLevel),
         politicsTeasingLevel: toTeasingLevel(input.politicsTeasingLevel),
         replyLimitHour: Number(input.replyLimitHour),
@@ -209,14 +237,19 @@ function renderDashboard(): string {
       <h1>MAX Engagement Demo</h1>
       <div class="meta">Локальный режим без Supabase, GitHub и реальных MAX-токенов</div>
     </div>
-    <div class="tabs">
+    <div>
+      <label class="meta" for="community-select">Активное сообщество</label>
+      <select id="community-select" onchange="selectCommunity(this.value)" style="min-width:260px;margin:4px 0 10px"></select>
+      <div class="tabs">
       <button onclick="setView('actions')">Черновики</button>
       <button onclick="setView('teases')">Подколы</button>
       <button onclick="setView('level3')">Уровень 3</button>
       <button onclick="setView('analytics')">Аналитика</button>
+      <button onclick="setView('memory')">Память</button>
       <button onclick="setView('channels')">Настройки</button>
       <button onclick="setView('style')">Стиль</button>
       <button class="warn" onclick="resetDemo()">Сброс demo</button>
+      </div>
     </div>
   </header>
   <main>
@@ -226,10 +259,41 @@ function renderDashboard(): string {
   </main>
   <script>
     let view = "actions";
+    let allChannels = [];
+    let selectedChannelId = localStorage.getItem("max-demo-selected-community") || "";
+    const communitySelect = document.getElementById("community-select");
     const status = document.getElementById("status");
     const metrics = document.getElementById("metrics");
     const list = document.getElementById("list");
-    load();
+    bootstrap();
+
+    async function bootstrap() {
+      const payload = await getJson("/api/channels");
+      allChannels = payload.channels || [];
+      if (!selectedChannelId || !allChannels.some(channel => channel.id === selectedChannelId)) {
+        selectedChannelId = allChannels[0]?.id || "";
+      }
+      renderCommunitySelect();
+      await load();
+    }
+
+    function renderCommunitySelect() {
+      communitySelect.innerHTML = allChannels.map(channel => {
+        const kind = channel.channelKind || channel.channel_kind || "MAX";
+        const city = channel.cityName || channel.city_name || channel.primaryCity || "город не указан";
+        return '<option value="' + escapeHtml(channel.id) + '" ' + (channel.id === selectedChannelId ? 'selected' : '') + '>' + escapeHtml(channel.title) + ' · ' + escapeHtml(kind) + ' · ' + escapeHtml(city) + '</option>';
+      }).join("");
+      communitySelect.disabled = allChannels.length < 2;
+    }
+
+    function selectCommunity(id) {
+      selectedChannelId = id;
+      localStorage.setItem("max-demo-selected-community", id);
+      const url = new URL(window.location.href);
+      url.searchParams.set("communityId", id);
+      history.replaceState(null, "", url);
+      load();
+    }
 
     function setView(next) { view = next; load(); }
 
@@ -237,11 +301,21 @@ function renderDashboard(): string {
       status.textContent = "Загрузка...";
       metrics.hidden = true;
       metrics.innerHTML = "";
+      if (!allChannels.length) {
+        list.innerHTML = '<div class="item">Нет подключённых сообществ.</div>';
+        status.textContent = "";
+        return;
+      }
       if (view === "analytics") return renderAnalytics(await getJson("/api/analytics"));
-      if (view === "channels") return renderChannels((await getJson("/api/channels")).channels);
-      if (view === "style") return renderStyle((await getJson("/api/channels")).channels, (await getJson("/api/style-examples")).examples);
+      if (view === "memory") return renderMemory(await getJson("/api/city-memory"));
+      if (view === "channels") return renderChannels(allChannels.filter(channel => channel.id === selectedChannelId));
+      if (view === "style") {
+        const examplesPayload = await getJson("/api/style-examples?channelId=" + encodeURIComponent(selectedChannelId));
+        return renderStyle(allChannels.filter(channel => channel.id === selectedChannelId), examplesPayload.examples);
+      }
       const query = view === "teases" ? "?view=teases" : view === "level3" ? "?level=3" : "";
-      renderActions((await getJson("/api/actions" + query)).actions);
+      const actions = (await getJson("/api/actions" + query)).actions;
+      renderActions(actions.filter(action => action.channelId === selectedChannelId));
     }
 
     async function getJson(path) {
@@ -297,6 +371,46 @@ function renderDashboard(): string {
       status.textContent = "";
     }
 
+    function renderMemory(payload) {
+      const summary = payload.summary || {};
+      const sourceById = new Map((payload.sources || []).map(source => [source.id, source]));
+      const objectById = new Map((payload.objects || []).map(object => [object.id, object]));
+      metrics.hidden = false;
+      metrics.innerHTML = [
+        ["Города", summary.cities], ["Паблики", summary.publics], ["Объекты", summary.objects],
+        ["Знания", summary.knowledge], ["На проверку", summary.needsReview], ["Спорные", summary.disputed]
+      ].map(([label, value]) => \`<div class="metric"><strong>\${escapeHtml(value ?? 0)}</strong><span>\${escapeHtml(label)}</span></div>\`).join("");
+      const selectedSourceIds = new Set((payload.sources || []).filter(source => source.channelId === selectedChannelId).map(source => source.id));
+      const recent = (payload.knowledge || []).filter(item => (item.sourceIds || []).some(id => selectedSourceIds.has(id))).slice().sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))).slice(0, 20);
+      const blocked = (payload.blockedItems || []).filter(item => !item.channelId || item.channelId === selectedChannelId).slice().sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).slice(0, 10);
+      list.innerHTML = \`
+        <form onsubmit="searchMemory(event)">
+          <div class="item-head"><strong>Поиск по городской памяти</strong><button class="primary" type="submit">Найти</button></div>
+          <div class="form-grid">
+            <input name="q" placeholder="Например: где покататься на лошадях">
+            <input name="cityName" placeholder="Город, например Иркутск">
+          </div>
+        </form>
+        <section id="memory-search" class="list"></section>
+        <article class="item">
+          <div class="item-head"><strong>Новые знания</strong></div>
+          \${recent.map(item => {
+            const object = objectById.get(item.objectId);
+            const source = sourceById.get(item.sourceIds?.[0]);
+            return \`<div class="item">
+              <div><strong>\${escapeHtml(object?.canonicalName || "Объект")}</strong> <span class="badge">\${escapeHtml(item.kind)}</span> <span class="badge">\${escapeHtml(item.trust)}</span> <span class="badge">\${Math.round(Number(item.confidence || 0) * 100)}%</span></div>
+              <div class="text">\${escapeHtml(item.content)}</div>
+              <div class="meta">Источник: \${escapeHtml(source?.authorName || source?.sourceType || "unknown")} / \${escapeHtml(source?.receivedAt || "")}</div>
+            </div>\`;
+          }).join("") || '<div class="meta">Пока нет знаний.</div>'}
+        </article>
+        <article class="item">
+          <div class="item-head"><strong>Заблокировано / модерация</strong></div>
+          \${blocked.map(item => \`<div class="item"><span class="badge">\${escapeHtml(item.reason)}</span><div class="text">\${escapeHtml(item.textExcerpt)}</div></div>\`).join("") || '<div class="meta">Нет заблокированных элементов.</div>'}
+        </article>\`;
+      status.textContent = "";
+    }
+
     function renderChannels(channels) {
       list.innerHTML = channels.map(channel => \`
         <form onsubmit="saveChannel(event)" data-id="\${channel.id}">
@@ -304,7 +418,7 @@ function renderDashboard(): string {
           <div class="form-grid">
             \${checkbox("enabled", "Включен", channel.enabled)}
             \${checkbox("dryRun", "Dry-run", channel.dryRun)}
-            \${select("mode", channel.mode, [["off","выключен"],["mentions_only","только упоминания"],["questions_only","только вопросы"],["suitable_messages","все подходящие"],["revive","оживление"],["moderation_only","модерация"]])}
+            \${select("mode", channel.mode, [["off","выключен"],["mentions_only","только упоминания"],["questions_only","только вопросы"],["suitable_messages","все подходящие"],["revive","оживление"],["moderation_only","модерация"],["city_assistant","городской ИИ-помощник"]])}
             \${number("teasingLevel", "Уровень подкола", channel.teasingLevel, 0, 3)}
             \${number("politicsTeasingLevel", "Политика/спорное", channel.politicsTeasingLevel, 0, 3)}
             \${number("replyLimitHour", "Ответов/час", channel.replyLimitHour, 0, 10000)}
@@ -341,6 +455,19 @@ function renderDashboard(): string {
     async function resetDemo() { await fetch("/api/reset", { method: "POST" }); load(); }
     async function deleteStyle(id) { await fetch("/api/style-examples/" + id, { method: "DELETE" }); load(); }
 
+    async function searchMemory(event) {
+      event.preventDefault();
+      const data = Object.fromEntries(new FormData(event.currentTarget).entries());
+      const target = document.getElementById("memory-search");
+      const params = new URLSearchParams({ q: String(data.q || ""), cityName: String(data.cityName || ""), channelId: selectedChannelId });
+      const payload = await getJson("/api/city-memory/search?" + params.toString());
+      target.innerHTML = (payload.results || []).map(result => \`
+        <article class="item">
+          <div><strong>\${escapeHtml(result.object.canonicalName)}</strong> <span class="badge">\${escapeHtml(result.answerPrefix)}</span> <span class="badge">score \${escapeHtml(result.score)}</span></div>
+          \${result.knowledge.map(item => \`<div class="text">\${escapeHtml(item.content)}</div><div class="meta">\${escapeHtml(item.kind)} / \${escapeHtml(item.trust)} / \${Math.round(Number(item.confidence || 0) * 100)}%</div>\`).join("")}
+        </article>\`).join("") || '<div class="item">Ничего не найдено.</div>';
+    }
+
     async function saveChannel(event) {
       event.preventDefault();
       const form = event.currentTarget;
@@ -348,6 +475,8 @@ function renderDashboard(): string {
       for (const checkbox of form.querySelectorAll('input[type="checkbox"]')) body[checkbox.name] = checkbox.checked;
       for (const numberInput of form.querySelectorAll('input[type="number"]')) body[numberInput.name] = Number(numberInput.value);
       await fetch("/api/channels/" + form.dataset.id, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      allChannels = (await getJson("/api/channels")).channels || [];
+      renderCommunitySelect();
       load();
     }
 

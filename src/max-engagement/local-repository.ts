@@ -2,12 +2,16 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
+import { createEmptyCityMemoryState, ingestCityMemory, ingestCityMemoryCandidate, normalizeCityMemoryState, searchCityMemory, summarizeCityMemory } from "../city-memory/local-store.js";
+import type { CityMemoryCandidate, CityMemoryIngestResult, CityMemorySearchResult, CityMemoryState } from "../city-memory/types.js";
 import { classifyPostText } from "./content-safety.js";
 import type { BotActionInput, EngagementRepository } from "./repository.js";
+import { getMaxUpdateUserName, isMaxChatMessageUpdate } from "./types.js";
 import type {
   MaxApiComment,
   MaxApiPost,
   MaxEngagementChannelRecord,
+  MaxEngagementChatMessageRecord,
   MaxEngagementCommentRecord,
   MaxEngagementMode,
   MaxEngagementPostClassification,
@@ -21,9 +25,10 @@ import type {
 export type LocalBotActionRecord = {
   id: string;
   channelId: string;
-  postId: string;
+  postId: string | null;
+  chatMessageId: string | null;
   threadId: string | null;
-  triggerCommentId: string;
+  triggerCommentId: string | null;
   actionType: BotActionInput["actionType"] | "delete_own_comment";
   status: BotActionInput["status"] | "approved" | "deleted";
   requestedTeasingLevel: TeasingLevel;
@@ -33,6 +38,9 @@ export type LocalBotActionRecord = {
   requiresHumanReview: boolean;
   createdAt: string;
   reviewedAt: string | null;
+  postedAt: string | null;
+  postedMaxCommentId: string | null;
+  errorMessage: string | null;
   deletedAt: string | null;
 };
 
@@ -72,9 +80,11 @@ export type LocalDemoData = {
   }>;
   threads: MaxEngagementThreadRecord[];
   comments: MaxEngagementCommentRecord[];
+  chatMessages: MaxEngagementChatMessageRecord[];
   actions: LocalBotActionRecord[];
   styleExamples: LocalStyleExampleRecord[];
   toxicityEvents: LocalToxicityEventRecord[];
+  cityMemory: CityMemoryState;
 };
 
 export const DEFAULT_LOCAL_DEMO_PATH = resolve(".local-data/max-engagement-demo.json");
@@ -94,6 +104,106 @@ export class LocalEngagementRepository implements EngagementRepository {
     const processed = new Set(data.actions.map((action) => action.triggerCommentId));
     return data.comments
       .filter((comment) => comment.channelId === channelId && !processed.has(comment.id))
+      .slice(0, limit);
+  }
+
+  async listUnprocessedChatMessages(channelId: string, limit = 50): Promise<MaxEngagementChatMessageRecord[]> {
+    const data = await this.read();
+    return data.chatMessages
+      .filter((message) => message.channelId === channelId && !message.authorIsBot && !message.processedAt)
+      .sort((left, right) => new Date(left.postedAt ?? 0).getTime() - new Date(right.postedAt ?? 0).getTime())
+      .slice(0, limit);
+  }
+
+  async listRecentChatMessages(
+    channelId: string,
+    beforeIso: string | null = null,
+    limit = 20
+  ): Promise<MaxEngagementChatMessageRecord[]> {
+    const data = await this.read();
+    const before = beforeIso ? new Date(beforeIso).getTime() : Number.POSITIVE_INFINITY;
+    return data.chatMessages
+      .filter((message) => message.channelId === channelId)
+      .filter((message) => new Date(message.postedAt ?? 0).getTime() <= before)
+      .sort((left, right) => new Date(right.postedAt ?? 0).getTime() - new Date(left.postedAt ?? 0).getTime())
+      .slice(0, limit)
+      .reverse();
+  }
+
+  async claimChatMessage(messageId: string, claimedAt = new Date().toISOString()): Promise<boolean> {
+    let claimed = false;
+    await this.update((data) => {
+      const message = data.chatMessages.find((item) => item.id === messageId);
+      if (message && !message.processedAt) {
+        message.processedAt = claimedAt;
+        claimed = true;
+      }
+    });
+    return claimed;
+  }
+
+  async markChatMessageProcessed(messageId: string, processedAt = new Date().toISOString()): Promise<void> {
+    await this.update((data) => {
+      const message = data.chatMessages.find((item) => item.id === messageId);
+      if (message) message.processedAt = processedAt;
+    });
+  }
+
+  async listUnprocessedPosts(channelId: string, limit = 20): Promise<MaxEngagementPostRecord[]> {
+    const data = await this.read();
+
+    /*
+     * Пост считается обработанным только тогда, когда для него уже есть
+     * initiative-действие, созданное не раньше самой публикации.
+     *
+     * Это важно для истории MAX: существующая запись поста может быть
+     * обновлена повторной синхронизацией. Старое действие не должно навсегда
+     * скрывать обновлённую публикацию из worker.
+     */
+    const latestInitiativeAt = new Map<string, number>();
+
+    for (const action of data.actions) {
+      if (action.actionType !== "initiative") {
+        continue;
+      }
+
+      if (!action.postId) {
+        continue;
+      }
+
+      const actionTime = new Date(action.createdAt).getTime();
+      const current = latestInitiativeAt.get(action.postId) ?? 0;
+
+      if (Number.isFinite(actionTime) && actionTime > current) {
+        latestInitiativeAt.set(action.postId, actionTime);
+      }
+    }
+
+    return data.posts
+      .filter((post) => post.channelId === channelId)
+      .filter((post) => {
+        const actionTime = latestInitiativeAt.get(post.id);
+        if (!actionTime) {
+          return true;
+        }
+
+        const postTime = new Date(post.postedAt ?? 0).getTime();
+
+        /*
+         * Для старых данных без postedAt сохраняем прежнее поведение:
+         * наличие initiative означает, что пост уже обработан.
+         */
+        if (!Number.isFinite(postTime) || postTime <= 0) {
+          return false;
+        }
+
+        return actionTime < postTime;
+      })
+      .sort((left, right) => {
+        const leftTime = new Date(left.postedAt ?? 0).getTime();
+        const rightTime = new Date(right.postedAt ?? 0).getTime();
+        return leftTime - rightTime;
+      })
       .slice(0, limit);
   }
 
@@ -137,6 +247,7 @@ export class LocalEngagementRepository implements EngagementRepository {
 
     return data.actions.filter((action) =>
       action.channelId === channelId &&
+      action.triggerCommentId !== null &&
       triggerIds.has(action.triggerCommentId) &&
       action.finalTeasingLevel > 0 &&
       new Date(action.createdAt).getTime() >= since
@@ -149,6 +260,7 @@ export class LocalEngagementRepository implements EngagementRepository {
         id: randomUUID(),
         channelId: input.channelId,
         postId: input.postId,
+        chatMessageId: input.chatMessageId ?? null,
         threadId: input.threadId,
         triggerCommentId: input.triggerCommentId,
         actionType: input.actionType,
@@ -160,6 +272,9 @@ export class LocalEngagementRepository implements EngagementRepository {
         requiresHumanReview: input.requiresHumanReview,
         createdAt: new Date().toISOString(),
         reviewedAt: null,
+        postedAt: input.status === "posted" ? new Date().toISOString() : null,
+        postedMaxCommentId: input.postedMaxCommentId ?? null,
+        errorMessage: input.errorMessage ?? null,
         deletedAt: null
       });
     });
@@ -193,6 +308,16 @@ export class LocalEngagementRepository implements EngagementRepository {
         data.posts.push(next);
         saved = next;
       }
+
+      ingestMessageIntoCityMemory(data, {
+        channel,
+        sourceType: "post",
+        sourceId: post.id,
+        authorName: post.authorName ?? null,
+        text: post.text,
+        url: post.url ?? null,
+        receivedAt: post.postedAt ?? null
+      });
     });
 
     return saved ?? fail("Failed to save local post");
@@ -249,6 +374,18 @@ export class LocalEngagementRepository implements EngagementRepository {
       } else {
         data.comments.push(next);
         saved = next;
+      }
+
+      const channel = data.channels.find((item) => item.id === channelId);
+      if (channel && comment.authorName !== channel.botName) {
+        ingestMessageIntoCityMemory(data, {
+          channel,
+          sourceType: "comment",
+          sourceId: comment.id,
+          authorName: comment.authorName ?? null,
+          text: comment.text,
+          receivedAt: comment.postedAt ?? null
+        });
       }
     });
 
@@ -438,6 +575,69 @@ export class LocalEngagementRepository implements EngagementRepository {
     };
   }
 
+  async ingestCityMemoryFromMessage(input: {
+    channel: MaxEngagementChannelRecord;
+    sourceType: "post" | "comment" | "admin" | "manual" | "system";
+    sourceId: string;
+    authorName?: string | null;
+    text: string;
+    url?: string | null;
+    receivedAt?: string | null;
+  }): Promise<CityMemoryIngestResult> {
+    let result: CityMemoryIngestResult | null = null;
+    await this.update((data) => {
+      result = ingestMessageIntoCityMemory(data, input);
+    });
+    return result ?? {
+      sources: 0,
+      objects: 0,
+      knowledge: 0,
+      blocked: 0,
+      revisions: 0
+    };
+  }
+
+  async ingestCityMemoryCandidate(input: {
+    channel: MaxEngagementChannelRecord;
+    sourceId: string;
+    authorName?: string | null;
+    text: string;
+    receivedAt?: string | null;
+    candidate: CityMemoryCandidate;
+  }): Promise<CityMemoryIngestResult> {
+    let result: CityMemoryIngestResult | null = null;
+    await this.update((data) => {
+      data.cityMemory = normalizeCityMemoryState(data.cityMemory);
+      result = ingestCityMemoryCandidate(data.cityMemory, {
+        cityName: inferCityName(input.channel),
+        channelId: input.channel.id,
+        publicTitle: input.channel.title,
+        sourceType: "comment",
+        sourceId: input.sourceId,
+        authorName: input.authorName ?? null,
+        text: input.text,
+        receivedAt: input.receivedAt ?? null,
+        candidate: input.candidate
+      });
+    });
+    return result ?? { sources: 0, objects: 0, knowledge: 0, blocked: 0, revisions: 0 };
+  }
+
+  async searchCityMemory(input: {
+    cityName?: string | null;
+    channelId?: string | null;
+    query: string;
+    limit?: number;
+  }): Promise<CityMemorySearchResult[]> {
+    const data = await this.read();
+    return searchCityMemory(data.cityMemory, input);
+  }
+
+  async cityMemorySummary() {
+    const data = await this.read();
+    return summarizeCityMemory(data.cityMemory);
+  }
+
   async resetDemoData(): Promise<void> {
     await this.write(createSeedData());
   }
@@ -519,6 +719,7 @@ export function createSeedData(): LocalDemoData {
       createThread(newsThreadId, newsChannelId, newsPostId, "max-demo-news-thread-1"),
       createThread(tragedyThreadId, newsChannelId, tragedyPostId, "max-demo-news-thread-2")
     ],
+    chatMessages: [],
     comments: [
       createComment(momsChannelId, momsPostId, momsThreadId, "max-demo-comment-1", "demo-user-1", "Анна", "А если ребенок вообще не спит днем, это нормально?", now),
       createComment(newsChannelId, newsPostId, newsThreadId, "max-demo-comment-2", "demo-user-2", "Игорь", "Ну конечно, площадку открыли, а лавочки опять забыли.", now),
@@ -546,7 +747,8 @@ export function createSeedData(): LocalDemoData {
         createdAt: now
       }
     ],
-    toxicityEvents: []
+    toxicityEvents: [],
+    cityMemory: createEmptyCityMemoryState()
   };
 }
 
@@ -561,9 +763,11 @@ function normalizeLocalDemoData(data: Partial<LocalDemoData>): LocalDemoData {
     posts: data.posts ?? seed.posts,
     threads: data.threads ?? seed.threads,
     comments: data.comments ?? seed.comments,
+    chatMessages: data.chatMessages ?? [],
     actions: data.actions ?? [],
     styleExamples: data.styleExamples ?? seed.styleExamples,
-    toxicityEvents: data.toxicityEvents ?? []
+    toxicityEvents: data.toxicityEvents ?? [],
+    cityMemory: normalizeCityMemoryState(data.cityMemory)
   };
 }
 
@@ -586,17 +790,24 @@ function upsertChannelFromUpdate(data: LocalDemoData, update: MaxUpdate): {
   }
 
   const maxChannelId = String(chatId);
+  const communityType = update.message?.recipient?.chat_type === "chat"
+    ? "chat"
+    : update.is_channel === true || update.message?.recipient?.chat_type === "channel"
+      ? "channel"
+      : undefined;
   const existing = data.channels.find((channel) => channel.maxChannelId === maxChannelId);
   if (existing) {
+    if (communityType) existing.communityType = communityType;
     return { record: existing, created: false };
   }
 
   const channel = createChannel({
     id: randomUUID(),
     maxChannelId,
-    title: update.is_channel ? `MAX канал ${maxChannelId}` : `MAX чат ${maxChannelId}`,
-    channelKind: "news",
-    mode: "suitable_messages",
+    title: communityType === "channel" ? `MAX канал ${maxChannelId}` : `MAX чат ${maxChannelId}`,
+    channelKind: "moms",
+    mode: communityType === "chat" ? "city_assistant" : "suitable_messages",
+    communityType,
     teasingLevel: 1,
     politicsTeasingLevel: 0,
     botName: "MAX Bot",
@@ -607,6 +818,10 @@ function upsertChannelFromUpdate(data: LocalDemoData, update: MaxUpdate): {
 }
 
 function upsertMessageCreatedUpdate(data: LocalDemoData, channel: MaxEngagementChannelRecord, update: MaxUpdate): boolean {
+  if (isMaxChatMessageUpdate(update)) {
+    return upsertChatMessageCreatedUpdate(data, channel, update);
+  }
+
   const message = update.message;
   const text = message?.body?.text?.trim();
   const messageId = message?.body?.mid;
@@ -615,7 +830,7 @@ function upsertMessageCreatedUpdate(data: LocalDemoData, channel: MaxEngagementC
   }
 
   const senderId = message.sender?.user_id;
-  const senderName = message.sender?.name || message.sender?.username || null;
+  const senderName = getMaxUpdateUserName(message.sender);
   const postedAt = typeof message.timestamp === "number" ? new Date(message.timestamp).toISOString() : new Date(update.timestamp ?? Date.now()).toISOString();
   const linkedMessageId = message.link?.mid ?? message.link?.message?.body?.mid ?? null;
 
@@ -630,6 +845,15 @@ function upsertMessageCreatedUpdate(data: LocalDemoData, channel: MaxEngagementC
       reactionsBefore: message.stat?.reactions ?? message.stat?.likes ?? null
     });
     upsertLocalThread(data, channel.id, post.id, String(messageId));
+    ingestMessageIntoCityMemory(data, {
+      channel,
+      sourceType: "post",
+      sourceId: String(messageId),
+      authorName: senderName,
+      text,
+      url: message.url ?? null,
+      receivedAt: postedAt
+    });
     return true;
   }
 
@@ -650,6 +874,56 @@ function upsertMessageCreatedUpdate(data: LocalDemoData, channel: MaxEngagementC
     text,
     postedAt
   });
+  if (!message.sender?.is_bot && senderName !== channel.botName) {
+    ingestMessageIntoCityMemory(data, {
+      channel,
+      sourceType: "comment",
+      sourceId: String(messageId),
+      authorName: senderName,
+      text,
+      receivedAt: postedAt
+    });
+  }
+  return true;
+}
+
+
+function upsertChatMessageCreatedUpdate(data: LocalDemoData, channel: MaxEngagementChannelRecord, update: MaxUpdate): boolean {
+  const message = update.message;
+  const text = message?.body?.text?.trim();
+  const messageId = message?.body?.mid;
+  if (!message || !messageId || !text) return false;
+
+  const postedAt = typeof message.timestamp === "number"
+    ? new Date(message.timestamp).toISOString()
+    : new Date(update.timestamp ?? Date.now()).toISOString();
+  const existing = data.chatMessages.find((item) => item.channelId === channel.id && item.maxMessageId === String(messageId));
+  const authorName = getMaxUpdateUserName(message.sender);
+  const next: MaxEngagementChatMessageRecord = {
+    id: existing?.id ?? randomUUID(),
+    channelId: channel.id,
+    maxMessageId: String(messageId),
+    authorUserId: message.sender?.user_id === undefined || message.sender?.user_id === null ? null : String(message.sender.user_id),
+    authorName,
+    authorIsBot: message.sender?.is_bot === true || Boolean(channel.botName && authorName === channel.botName),
+    text,
+    postedAt,
+    replyToMaxMessageId: message.link?.mid ?? message.link?.message?.body?.mid ?? null,
+    processedAt: existing?.processedAt ?? null
+  };
+  if (existing) Object.assign(existing, next);
+  else data.chatMessages.push(next);
+
+  if (!next.authorIsBot) {
+    ingestMessageIntoCityMemory(data, {
+      channel,
+      sourceType: "comment",
+      sourceId: next.maxMessageId,
+      authorName: next.authorName,
+      text: next.text,
+      receivedAt: next.postedAt
+    });
+  }
   return true;
 }
 
@@ -741,6 +1015,7 @@ function createChannel(input: {
   title: string;
   channelKind: "moms" | "news";
   mode: MaxEngagementMode;
+  communityType?: "channel" | "chat";
   teasingLevel: TeasingLevel;
   politicsTeasingLevel?: TeasingLevel;
   botName: string;
@@ -826,6 +1101,37 @@ function normalizeChannelPatch(patch: Partial<MaxEngagementChannelRecord>): Part
     next.politicsTeasingLevel = toTeasingLevel(next.politicsTeasingLevel);
   }
   return next;
+}
+
+function ingestMessageIntoCityMemory(data: LocalDemoData, input: {
+  channel: MaxEngagementChannelRecord;
+  sourceType: "post" | "comment" | "admin" | "manual" | "system";
+  sourceId: string;
+  authorName?: string | null;
+  text: string;
+  url?: string | null;
+  receivedAt?: string | null;
+}): CityMemoryIngestResult {
+  data.cityMemory = normalizeCityMemoryState(data.cityMemory);
+  return ingestCityMemory(data.cityMemory, {
+    cityName: inferCityName(input.channel),
+    channelId: input.channel.id,
+    publicTitle: input.channel.title,
+    sourceType: input.sourceType,
+    sourceId: input.sourceId,
+    authorName: input.authorName ?? null,
+    text: input.text,
+    url: input.url ?? null,
+    receivedAt: input.receivedAt ?? null
+  });
+}
+
+function inferCityName(channel: MaxEngagementChannelRecord): string {
+  const source = `${channel.title} ${channel.maxChannelId}`.toLowerCase();
+  if (source.includes("иркутск")) return "Иркутск";
+  if (source.includes("ангарск")) return "Ангарск";
+  if (source.includes("братск")) return "Братск";
+  return "Неизвестный город";
 }
 
 function toTeasingLevel(value: number): TeasingLevel {

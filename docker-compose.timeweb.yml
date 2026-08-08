@@ -7,6 +7,11 @@ services:
       dockerfile: Dockerfile
     container_name: max-engagement-bot-worker
     restart: unless-stopped
+    command: npm run max:watch
+    environment:
+      ENGAGEMENT_STORAGE: supabase
+      MAX_API_MODE: http
+      NODE_ENV: production
     env_file:
       - path: .env.timeweb
         required: false
@@ -21,6 +26,9 @@ services:
     restart: unless-stopped
     command: npm run web
     environment:
+      ENGAGEMENT_STORAGE: supabase
+      MAX_API_MODE: http
+      NODE_ENV: production
       ADMIN_HOST: 0.0.0.0
       ADMIN_PORT: 4317
     env_file:
@@ -28,6 +36,11 @@ services:
         required: false
     expose:
       - "4317"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4317/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
     networks:
       - max-engagement-bot-net
 

@@ -129,8 +129,13 @@ const server = createServer(async (req, res) => {
       return;
     }
 
-    if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/") {
-      sendJson(res, 200, { ok: true, service: "max-engagement-bot" });
+    if ((req.method === "GET" || req.method === "HEAD") && (url.pathname === "/" || url.pathname === "/admin")) {
+      if (req.method === "HEAD") {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+        res.end();
+        return;
+      }
+      sendHtml(res, renderDashboard());
       return;
     }
 
@@ -141,11 +146,6 @@ const server = createServer(async (req, res) => {
 
     if (!isAdminAuthorized(req)) {
       sendUnauthorized(res);
-      return;
-    }
-
-    if (req.method === "GET" && url.pathname === "/admin") {
-      sendHtml(res, renderDashboard());
       return;
     }
 
@@ -164,6 +164,23 @@ const server = createServer(async (req, res) => {
 
     if (req.method === "GET" && url.pathname === "/api/channels") {
       sendJson(res, 200, await listChannels());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/city-memory") {
+      sendJson(res, 200, await getCityMemoryDashboard());
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/city-memory/search") {
+      sendJson(res, 200, {
+        results: await repository.searchCityMemory({
+          query: url.searchParams.get("q") ?? "",
+          cityName: url.searchParams.get("cityName") ?? undefined,
+          channelId: url.searchParams.get("channelId") ?? undefined,
+          limit: 20
+        })
+      });
       return;
     }
 
@@ -207,6 +224,7 @@ const server = createServer(async (req, res) => {
 
 server.listen(port, host, () => {
   console.log(`MAX engagement admin: http://${host}:${port}`);
+  console.log("Кабинет использует Supabase и управляет реальным ботом.");
 });
 
 async function handleMaxWebhook(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -488,6 +506,71 @@ async function listChannels(): Promise<{ channels: ChannelSettings[] }> {
   };
 }
 
+async function getCityMemoryDashboard(): Promise<{
+  summary: {
+    cities: number;
+    publics: number;
+    objects: number;
+    knowledge: number;
+    needsReview: number;
+    blocked: number;
+    disputed: number;
+    stale: number;
+  };
+  cities: Array<Record<string, unknown>>;
+  publics: Array<Record<string, unknown>>;
+  objects: Array<Record<string, unknown>>;
+  knowledge: Array<Record<string, unknown>>;
+  sources: Array<Record<string, unknown>>;
+  blockedItems: Array<Record<string, unknown>>;
+}> {
+  const [
+    citiesResult,
+    publicsResult,
+    objectsResult,
+    knowledgeResult,
+    sourcesResult,
+    blockedResult
+  ] = await Promise.all([
+    supabase.from("city_memory_cities").select("id, name, created_at").order("created_at", { ascending: false }).limit(100),
+    supabase.from("city_memory_publics").select("id, city_id, channel_id, title, created_at").order("created_at", { ascending: false }).limit(100),
+    supabase.from("city_memory_objects").select("id, city_id, public_id, object_type, canonical_name, aliases, categories, related_terms, merged_into_id, confidence, created_at, updated_at").is("merged_into_id", null).order("updated_at", { ascending: false }).limit(100),
+    supabase.from("city_memory_knowledge").select("id, city_id, public_id, object_id, knowledge_kind, content, source_ids, received_at, last_verified_at, valid_until, confidence, trust, confirmations, refutations, status, contradiction_group_id, created_at, updated_at").neq("status", "deleted").order("updated_at", { ascending: false }).limit(100),
+    supabase.from("city_memory_sources").select("id, city_id, public_id, channel_id, source_type, source_id, author_name, text_excerpt, url, received_at").order("received_at", { ascending: false }).limit(100),
+    supabase.from("city_memory_blocked_items").select("id, city_id, public_id, source_id, reason, text_excerpt, created_at").order("created_at", { ascending: false }).limit(100)
+  ]);
+
+  if (citiesResult.error) throw citiesResult.error;
+  if (publicsResult.error) throw publicsResult.error;
+  if (objectsResult.error) throw objectsResult.error;
+  if (knowledgeResult.error) throw knowledgeResult.error;
+  if (sourcesResult.error) throw sourcesResult.error;
+  if (blockedResult.error) throw blockedResult.error;
+
+  const knowledge = (knowledgeResult.data ?? []) as Array<Record<string, unknown>>;
+  const blockedItems = (blockedResult.data ?? []) as Array<Record<string, unknown>>;
+  const now = Date.now();
+
+  return {
+    summary: {
+      cities: citiesResult.data?.length ?? 0,
+      publics: publicsResult.data?.length ?? 0,
+      objects: objectsResult.data?.length ?? 0,
+      knowledge: knowledge.length,
+      needsReview: knowledge.filter((item) => item.status === "needs_review").length + blockedItems.length,
+      blocked: blockedItems.length,
+      disputed: knowledge.filter((item) => item.trust === "disputed" || item.contradiction_group_id).length,
+      stale: knowledge.filter((item) => typeof item.valid_until === "string" && new Date(item.valid_until).getTime() < now).length
+    },
+    cities: citiesResult.data ?? [],
+    publics: publicsResult.data ?? [],
+    objects: objectsResult.data ?? [],
+    knowledge,
+    sources: sourcesResult.data ?? [],
+    blockedItems
+  };
+}
+
 async function updateChannel(id: string, body: unknown): Promise<{ ok: true }> {
   const input = body as Record<string, unknown>;
   const teasingLevel = clampInteger(input.teasing_level, 0, 3, "teasing_level");
@@ -504,7 +587,7 @@ async function updateChannel(id: string, body: unknown): Promise<{ ok: true }> {
     channel_kind: enumString(input.channel_kind, ["moms", "news"], "channel_kind"),
     mode: enumString(
       input.mode,
-      ["off", "mentions_only", "questions_only", "suitable_messages", "revive", "moderation_only"],
+      ["off", "mentions_only", "questions_only", "suitable_messages", "revive", "moderation_only", "city_assistant"],
       "mode"
     ),
     bot_name: optionalString(input.bot_name),
@@ -1127,6 +1210,7 @@ function renderDashboard(): string {
       <button class="tab" data-view="teases">Журнал подколов</button>
       <button class="tab" data-view="level3">Только уровень 3</button>
       <button class="tab" data-view="analytics">Аналитика</button>
+      <button class="tab" data-view="memory">Память</button>
       <button class="tab" data-view="settings">Настройки каналов</button>
       <button class="tab" data-view="style">Стиль</button>
     </nav>
@@ -1164,6 +1248,12 @@ function renderDashboard(): string {
           if (!response.ok) throw new Error(payload.error || "Ошибка загрузки");
           renderAnalytics(payload);
           status.textContent = "Аналитика по текущим данным Supabase";
+        } else if (currentView === "memory") {
+          const response = await fetch("/api/city-memory");
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.error || "Ошибка загрузки памяти");
+          renderMemory(payload);
+          status.textContent = "Городская память: " + (payload.summary?.knowledge || 0) + " знаний";
         } else if (currentView === "settings") {
           const response = await fetch("/api/channels");
           const payload = await response.json();
@@ -1237,7 +1327,8 @@ function renderDashboard(): string {
               ["questions_only", "только вопросы"],
               ["suitable_messages", "все подходящие"],
               ["revive", "оживление"],
-              ["moderation_only", "модерация без ответов"]
+              ["moderation_only", "модерация без ответов"],
+              ["city_assistant", "городской ИИ-помощник"]
             ])}
             \${selectField("Тон", "tone", channel.tone, [
               ["friendly", "дружелюбный"],
@@ -1473,6 +1564,82 @@ function renderDashboard(): string {
       \`;
     }
 
+    function renderMemory(payload) {
+      const summary = payload.summary || {};
+      const sourceById = new Map((payload.sources || []).map((source) => [source.id, source]));
+      const objectById = new Map((payload.objects || []).map((object) => [object.id, object]));
+      const cityOptions = (payload.cities || []).map((city) =>
+        \`<option value="\${escapeHtml(city.name)}">\${escapeHtml(city.name)}</option>\`
+      ).join("");
+      const publicOptions = (payload.publics || []).map((item) =>
+        \`<option value="\${escapeHtml(item.channel_id)}">\${escapeHtml(item.title)}</option>\`
+      ).join("");
+
+      metrics.hidden = false;
+      metrics.innerHTML = [
+        ["Города", summary.cities],
+        ["Паблики", summary.publics],
+        ["Объекты", summary.objects],
+        ["Знания", summary.knowledge],
+        ["На проверку", summary.needsReview],
+        ["Спорные", summary.disputed]
+      ].map(([label, value]) => \`
+        <div class="metric">
+          <strong>\${escapeHtml(value ?? 0)}</strong>
+          <span>\${escapeHtml(label)}</span>
+        </div>
+      \`).join("");
+
+      const recent = (payload.knowledge || []).slice(0, 30);
+      const blocked = (payload.blockedItems || []).slice(0, 20);
+
+      list.innerHTML = \`
+        <form class="settings-form" onsubmit="searchMemory(event)">
+          <div class="item-head" style="padding: 0 0 12px; border-bottom: 1px solid var(--line);">
+            <div>
+              <strong>Поиск по городской памяти</strong>
+              <div class="meta">Ищет по объектам, алиасам, категориям и связанным понятиям</div>
+            </div>
+            <div class="actions"><button class="primary" type="submit">Найти</button></div>
+          </div>
+          <div class="form-grid">
+            <div class="field full"><label>Запрос</label><input name="q" placeholder="Например: где покататься на лошадях"></div>
+            <div class="field"><label>Город</label><select name="cityName"><option value="">Все города</option>\${cityOptions}</select></div>
+            <div class="field"><label>Паблик</label><select name="channelId"><option value="">Все паблики</option>\${publicOptions}</select></div>
+          </div>
+        </form>
+        <section id="memory-search" class="list"></section>
+        <article class="item">
+          <div class="item-head"><strong>Новые знания</strong></div>
+          \${recent.length ? recent.map((item) => {
+            const object = objectById.get(item.object_id);
+            const source = sourceById.get((item.source_ids || [])[0]);
+            return \`<div class="cell" style="margin-bottom: 12px;">
+              <div>
+                <strong>\${escapeHtml(object?.canonical_name || "Объект")}</strong>
+                <span class="badge">\${escapeHtml(item.knowledge_kind)}</span>
+                <span class="badge">\${escapeHtml(item.trust)}</span>
+                <span class="badge">\${Math.round(Number(item.confidence || 0) * 100)}%</span>
+                \${item.status === "needs_review" ? '<span class="badge review">проверка</span>' : ""}
+              </div>
+              <div class="text">\${escapeHtml(item.content)}</div>
+              <div class="meta">Источник: \${escapeHtml(source?.author_name || source?.source_type || "unknown")} / \${escapeHtml(source?.received_at || "")}</div>
+            </div>\`;
+          }).join("") : '<div class="empty">Пока нет сохраненных знаний.</div>'}
+        </article>
+        <article class="item">
+          <div class="item-head"><strong>Заблокировано / модерация</strong></div>
+          \${blocked.length ? blocked.map((item) => \`
+            <div class="cell" style="margin-bottom: 12px;">
+              <span class="badge review">\${escapeHtml(item.reason)}</span>
+              <div class="text">\${escapeHtml(item.text_excerpt)}</div>
+              <div class="meta">\${escapeHtml(item.created_at)}</div>
+            </div>
+          \`).join("") : '<div class="empty">Нет заблокированных элементов.</div>'}
+        </article>
+      \`;
+    }
+
     async function sendCommand(id, command) {
       status.textContent = "Сохраняю...";
       const response = await fetch("/api/actions/" + id + "/" + command, { method: "POST" });
@@ -1566,6 +1733,47 @@ function renderDashboard(): string {
         return;
       }
       await load();
+    }
+
+    async function searchMemory(event) {
+      event.preventDefault();
+      const form = event.currentTarget;
+      const data = Object.fromEntries(new FormData(form).entries());
+      const target = document.getElementById("memory-search");
+      const params = new URLSearchParams({
+        q: String(data.q || ""),
+        cityName: String(data.cityName || ""),
+        channelId: String(data.channelId || "")
+      });
+      status.textContent = "Ищу по памяти...";
+      const response = await fetch("/api/city-memory/search?" + params.toString());
+      const payload = await response.json();
+      if (!response.ok) {
+        status.textContent = payload.error || "Ошибка поиска";
+        return;
+      }
+      const results = payload.results || [];
+      target.innerHTML = results.length ? results.map((result) => \`
+        <article class="item">
+          <div class="item-head">
+            <div>
+              <strong>\${escapeHtml(result.object.canonicalName)}</strong>
+              <div class="meta">
+                <span class="badge">\${escapeHtml(result.object.type)}</span>
+                <span class="badge">\${escapeHtml(result.answerPrefix)}</span>
+                <span class="badge">score \${escapeHtml(result.score)}</span>
+              </div>
+            </div>
+          </div>
+          \${result.knowledge.map((item) => \`
+            <div class="cell" style="margin-bottom: 10px;">
+              <div class="text">\${escapeHtml(item.content)}</div>
+              <div class="meta">\${escapeHtml(item.kind)} / \${escapeHtml(item.trust)} / \${Math.round(Number(item.confidence || 0) * 100)}%</div>
+            </div>
+          \`).join("")}
+        </article>
+      \`).join("") : '<div class="empty">Ничего не найдено.</div>';
+      status.textContent = "Найдено: " + results.length;
     }
 
     function escapeHtml(value) {

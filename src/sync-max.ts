@@ -24,9 +24,13 @@ export async function syncMaxOnce(): Promise<SyncResult> {
     comments: 0,
     worker: {
       channels: 0,
+      posts: 0,
       comments: 0,
+      chatMessages: 0,
       actions: 0,
-      skipped: 0
+      posted: 0,
+      skipped: 0,
+      failed: 0
     }
   };
 

@@ -129,8 +129,9 @@ npm run demo:admin
 публикует порты наружу и не требует Nginx:
 
 ```bash
-cp .env.timeweb.example .env.timeweb
-docker compose -f docker-compose.timeweb.yml up -d --build
+powershell -ExecutionPolicy Bypass -File scripts/prepare-timeweb-env.ps1
+powershell -ExecutionPolicy Bypass -File scripts/build-timeweb-package.ps1
+docker compose -p max-engagement-bot -f docker-compose.timeweb.yml up -d --build
 ```
 
 Перед изменением общих настроек сервера, Nginx, PM2, сетей, портов, домена,

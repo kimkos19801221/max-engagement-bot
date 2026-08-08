@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { request as httpsRequest } from "node:https";
 import { fileURLToPath } from "node:url";
@@ -28,6 +29,12 @@ type MaxMessage = {
     reactions?: number;
     likes?: number;
     views?: number;
+  };
+  link?: {
+    type?: string;
+    message?: {
+      mid?: string;
+    };
   };
   url?: string;
 };
@@ -93,7 +100,7 @@ async function requestJson<T>(url: URL): Promise<T> {
     throw new Error("MAX_API_TOKEN is required");
   }
 
-  const caFile = process.env.MAX_API_CA_FILE;
+  const caFile = resolveCaFile();
   const ca = caFile ? await readFile(caFile, "utf8") : undefined;
 
   return await new Promise((resolve, reject) => {
@@ -123,6 +130,10 @@ async function requestJson<T>(url: URL): Promise<T> {
 }
 
 function toPost(channel: MaxEngagementChannelRecord, message: MaxMessage): MaxApiPost | null {
+  if (message.link) {
+    return null;
+  }
+
   const id = message.body?.mid;
   const text = message.body?.text?.trim();
   if (!id || !text) {
@@ -173,4 +184,14 @@ function sanitizeError(message: string): string {
   }
 
   return message.replaceAll(token, "[MAX_API_TOKEN]");
+}
+
+function resolveCaFile(): string | undefined {
+  const configured = process.env.MAX_API_CA_FILE;
+  if (configured && existsSync(configured)) {
+    return configured;
+  }
+
+  const fallback = resolve(".local-data/certs/max-api-ca-bundle.pem");
+  return existsSync(fallback) ? fallback : configured;
 }

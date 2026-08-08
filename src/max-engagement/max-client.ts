@@ -1,10 +1,17 @@
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { request as httpsRequest } from "node:https";
+import { resolve } from "node:path";
+
 import type {
   MaxApiComment,
   MaxApiPost,
   MaxClient,
   MaxEngagementChannelRecord,
   MaxPublishCommentInput,
-  MaxPublishCommentResult
+  MaxPublishCommentResult,
+  MaxSendChatMessageInput,
+  MaxSendChatMessageResult
 } from "./types.js";
 
 export function createMaxClientFromEnv(): MaxClient {
@@ -15,6 +22,7 @@ export function createMaxClientFromEnv(): MaxClient {
 
   return new HttpMaxClient({
     baseUrl: process.env.MAX_API_BASE_URL,
+    caFile: process.env.MAX_API_CA_FILE,
     token: process.env.MAX_API_TOKEN
   });
 }
@@ -70,10 +78,14 @@ export class MockMaxClient implements MaxClient {
   async deleteOwnComment(): Promise<void> {
     return;
   }
+
+  async sendChatMessage(input: MaxSendChatMessageInput): Promise<MaxSendChatMessageResult> {
+    return { messageId: `mock-chat:${input.chatId}:${Date.now()}` };
+  }
 }
 
 class HttpMaxClient implements MaxClient {
-  constructor(private readonly config: { baseUrl?: string; token?: string }) {}
+  constructor(private readonly config: { baseUrl?: string; caFile?: string; token?: string }) {}
 
   async fetchPosts(): Promise<MaxApiPost[]> {
     throw new Error("MAX real post/comment ingestion is event-driven; use Webhook or Long Polling updates instead of fetchPosts");
@@ -89,7 +101,10 @@ class HttpMaxClient implements MaxClient {
       `/messages?chat_id=${encodeURIComponent(input.channelId)}`,
       {
         text: input.text,
-        notify: false
+        link: {
+          type: "reply",
+          mid: input.postId
+        }
       }
     );
 
@@ -103,25 +118,78 @@ class HttpMaxClient implements MaxClient {
     throw new Error("MAX deleteOwnComment needs the real message id mapping and must be enabled only after live posting is approved");
   }
 
+  async sendChatMessage(input: MaxSendChatMessageInput): Promise<MaxSendChatMessageResult> {
+    const payload: Record<string, unknown> = { text: input.text };
+    if (input.replyToMessageId) {
+      payload.link = { type: "reply", mid: input.replyToMessageId };
+    }
+    const message = await this.request<{ body?: { mid?: string }; id?: string; message_id?: string }>(
+      "POST",
+      `/messages?chat_id=${encodeURIComponent(input.chatId)}`,
+      payload
+    );
+    const messageId = message.body?.mid ?? message.message_id ?? message.id;
+    return { messageId: messageId ? String(messageId) : `max-message:${Date.now()}` };
+  }
+
   private async request<T>(method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<T> {
     const baseUrl = this.config.baseUrl || "https://platform-api2.max.ru";
     if (!this.config.token) {
       throw new Error("MAX_API_TOKEN is required for MAX_API_MODE=http");
     }
 
-    const response = await fetch(new URL(path, baseUrl), {
-      method,
-      headers: {
-        Authorization: this.config.token,
-        ...(body === undefined ? {} : { "Content-Type": "application/json" })
-      },
-      body: body === undefined ? undefined : JSON.stringify(body)
-    });
+    const text = await this.requestText(new URL(path, baseUrl), method, body);
+    return JSON.parse(text) as T;
+  }
 
-    if (!response.ok) {
-      throw new Error(`MAX API ${method} ${path} failed with ${response.status}: ${await response.text()}`);
+  private async requestText(url: URL, method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE", body?: unknown): Promise<string> {
+    if (!this.config.token) {
+      throw new Error("MAX_API_TOKEN is required for MAX_API_MODE=http");
     }
 
-    return await response.json() as T;
+    const caFile = resolveCaFile(this.config.caFile);
+    const ca = caFile ? await readFile(caFile, "utf8") : undefined;
+    const payload = body === undefined ? undefined : JSON.stringify(body);
+
+    return await new Promise((resolve, reject) => {
+      const req = httpsRequest(url, {
+        method,
+        headers: {
+          Authorization: this.config.token,
+          ...(payload === undefined ? {} : {
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(payload)
+          })
+        },
+        ca
+      }, (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`MAX API ${method} ${url.pathname} failed with ${res.statusCode ?? 0}: ${text}`));
+            return;
+          }
+
+          resolve(text);
+        });
+      });
+
+      req.on("error", reject);
+      if (payload !== undefined) {
+        req.write(payload);
+      }
+      req.end();
+    });
   }
+}
+
+function resolveCaFile(configured?: string): string | undefined {
+  if (configured && existsSync(configured)) {
+    return configured;
+  }
+
+  const fallback = resolve(".local-data/certs/max-api-ca-bundle.pem");
+  return existsSync(fallback) ? fallback : configured;
 }
