@@ -137,6 +137,45 @@ describe("LocalEngagementRepository MAX update import", () => {
     expect(messages[0].metadataText).toContain("https://example.com/join");
   });
 
+  it("upgrades an existing channel row when a later update proves it is a chat", async () => {
+    const repository = await createTempRepository();
+    await repository.resetDemoData();
+    const chatId = -69557079119353;
+
+    await repository.importMaxUpdates([
+      messageCreatedUpdate({
+        chatId,
+        mid: "channel-looking-mid",
+        text: "Первое событие без признака группового чата",
+        senderName: "MAX",
+        timestamp: 1_800_000_100_000
+      })
+    ]);
+
+    await repository.importMaxUpdates([{
+      update_type: "message_created",
+      timestamp: 1_800_000_101_000,
+      chat_id: chatId,
+      message: {
+        sender: { user_id: 779, first_name: "Анна", is_bot: false },
+        recipient: { chat_id: chatId, chat_type: "chat" },
+        timestamp: 1_800_000_101_000,
+        body: {
+          mid: "real-chat-mid",
+          text: "Алина, проверь чат"
+        }
+      }
+    }]);
+
+    const data = await repository.read();
+    const upgraded = data.channels.find((channel) => channel.maxChannelId === String(chatId));
+
+    expect(upgraded?.communityType).toBe("chat");
+    expect(upgraded?.enabled).toBe(true);
+    expect(upgraded?.mode).toBe("suitable_messages");
+    expect(upgraded?.dryRun).toBe(false);
+  });
+
 });
 
 async function createTempRepository(): Promise<LocalEngagementRepository> {

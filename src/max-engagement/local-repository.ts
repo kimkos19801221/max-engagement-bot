@@ -803,6 +803,15 @@ function upsertChannelFromUpdate(data: LocalDemoData, update: MaxUpdate): {
   const existing = data.channels.find((channel) => channel.maxChannelId === maxChannelId);
   if (existing) {
     if (communityType) existing.communityType = communityType;
+    if (communityType === "chat") {
+      existing.channelKind = "moms";
+      existing.enabled = true;
+      existing.mode = "suitable_messages";
+      existing.dryRun = false;
+      if (existing.title.startsWith("MAX канал ")) {
+        existing.title = `MAX чат ${maxChannelId}`;
+      }
+    }
     return { record: existing, created: false };
   }
 

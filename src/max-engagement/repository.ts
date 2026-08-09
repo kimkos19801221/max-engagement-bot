@@ -1054,9 +1054,44 @@ export class MaxEngagementRepository implements EngagementRepository {
     }
 
     if (existing) {
+      const mapped = mapChannel(existing as ChannelRow);
+      if (communityType === "chat" && (
+        mapped.communityType !== "chat" ||
+        !mapped.enabled ||
+        mapped.mode === "off" ||
+        mapped.dryRun
+      )) {
+        const patch = {
+          community_type: "chat",
+          title: mapped.title.startsWith("MAX канал ")
+            ? `MAX чат ${maxChannelId}`
+            : mapped.title,
+          channel_kind: "moms",
+          enabled: true,
+          mode: "suitable_messages",
+          dry_run: false
+        };
+
+        const { data: updated, error: updateError } = await this.supabase
+          .from("max_engagement_channels")
+          .update(patch)
+          .eq("id", mapped.id)
+          .select("*")
+          .single();
+
+        if (updateError) {
+          throw updateError;
+        }
+
+        return {
+          record: mapChannel(updated as ChannelRow),
+          created: false
+        };
+      }
+
       return {
         record: {
-          ...mapChannel(existing as ChannelRow),
+          ...mapped,
           communityType
         },
         created: false
