@@ -166,6 +166,7 @@ export type MaxEngagementChatMessageRecord = {
    */
   replyToMaxMessageId: string | null;
   linkedText?: string | null;
+  metadataText?: string | null;
 
   /*
    * После создания bot action сообщение считается обработанным.
@@ -332,6 +333,7 @@ export type MaxUpdateMessage = {
     mid?: string;
     text?: string | null;
     attachments?: unknown[] | null;
+    format?: unknown;
   } | null;
 
   stat?: {

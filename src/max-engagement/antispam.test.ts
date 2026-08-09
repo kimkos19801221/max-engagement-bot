@@ -68,6 +68,22 @@ describe("MAX chat antispam", () => {
     expect(decision.deleteSucceeded).toBe(true);
   });
 
+  it("blocks a participant message with a hidden formatted link", async () => {
+    const client = new FakeMaxClient();
+    const decision = await moderateChatMessage({
+      channel: createChannel({ antispamEnabled: true }),
+      message: createMessage({
+        text: "Рыбалка | Клевое Место",
+        metadataText: "https://example.com/join"
+      }),
+      maxClient: client,
+      logger: silentLogger()
+    });
+
+    expect(decision.shouldStopPipeline).toBe(true);
+    expect(decision.deleteSucceeded).toBe(true);
+  });
+
   it("bypasses current chat admins using real author id", async () => {
     const client = new FakeMaxClient([{ userId: "user-1", isAdmin: true, isOwner: false, isBot: false, permissions: ["write"] }]);
     const decision = await moderateChatMessage({
@@ -137,6 +153,11 @@ describe("containsForbiddenLink", () => {
   it("does not use an overly aggressive domain heuristic", () => {
     expect(containsForbiddenLink("у меня болит горло. что делать")).toBe(false);
     expect(containsForbiddenLink("мамочки. подскажите стоматолога")).toBe(false);
+  });
+
+  it("detects URLs hidden in markdown or HTML markup", () => {
+    expect(containsForbiddenLink("[Рыбалка | Клевое Место](https://example.com/join)")).toBe(true);
+    expect(containsForbiddenLink('<a href="https://example.com/join">Рыбалка</a>')).toBe(true);
   });
 });
 
@@ -218,6 +239,7 @@ function createMessage(input: Partial<MaxEngagementChatMessageRecord> = {}): Max
     postedAt: new Date(0).toISOString(),
     replyToMaxMessageId: null,
     linkedText: input.linkedText ?? null,
+    metadataText: input.metadataText ?? null,
     processedAt: null,
     ...input
   };

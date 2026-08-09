@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 
 import { createEmptyCityMemoryState, ingestCityMemory, ingestCityMemoryCandidate, normalizeCityMemoryState, searchCityMemory, summarizeCityMemory } from "../city-memory/local-store.js";
 import type { CityMemoryCandidate, CityMemoryIngestResult, CityMemorySearchResult, CityMemoryState } from "../city-memory/types.js";
+import { extractLinkMetadataText } from "./antispam.js";
 import { classifyPostText } from "./content-safety.js";
 import type { BotActionInput, EngagementRepository } from "./repository.js";
 import { getMaxUpdateUserName, isMaxChatMessageUpdate } from "./types.js";
@@ -914,13 +915,31 @@ function upsertChatMessageCreatedUpdate(data: LocalDemoData, channel: MaxEngagem
     text,
     postedAt,
     replyToMaxMessageId: message.link?.mid ?? message.link?.message?.body?.mid ?? null,
-    linkedText: message.link?.message?.body?.text?.trim() || null,
+    linkedText: buildChatLinkText(message),
+    metadataText: extractLinkMetadataText({
+      body: message.body,
+      url: message.url,
+      link: message.link
+    }),
     processedAt: existing?.processedAt ?? null
   };
   if (existing) Object.assign(existing, next);
   else data.chatMessages.push(next);
 
   return true;
+}
+
+function buildChatLinkText(message: NonNullable<MaxUpdate["message"]>): string | null {
+  const parts = [
+    message.link?.message?.body?.text?.trim() || null,
+    extractLinkMetadataText({
+      body: message.body,
+      url: message.url,
+      link: message.link
+    })
+  ].filter((item): item is string => Boolean(item));
+
+  return parts.length > 0 ? parts.join("\n") : null;
 }
 
 function upsertLocalPost(data: LocalDemoData, channel: MaxEngagementChannelRecord, input: {

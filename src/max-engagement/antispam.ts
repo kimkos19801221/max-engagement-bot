@@ -115,8 +115,59 @@ export function containsForbiddenLink(text: string): boolean {
   return patterns.some((pattern) => pattern.test(normalized));
 }
 
+export function extractLinkMetadataText(value: unknown): string | null {
+  const found: string[] = [];
+  const seenValues = new Set<string>();
+  const seenObjects = new WeakSet<object>();
+  collectLinkMetadataText(value, found, seenValues, seenObjects, 0);
+  return found.length > 0 ? found.join("\n") : null;
+}
+
 function getModerationText(message: MaxEngagementChatMessageRecord): string {
-  return [message.text, message.linkedText].filter(Boolean).join("\n");
+  return [message.text, message.linkedText, message.metadataText].filter(Boolean).join("\n");
+}
+
+function collectLinkMetadataText(
+  value: unknown,
+  found: string[],
+  seenValues: Set<string>,
+  seenObjects: WeakSet<object>,
+  depth: number
+): void {
+  if (found.length >= 20 || depth > 8 || value === null || value === undefined) {
+    return;
+  }
+
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (text && text.length <= 1500 && containsForbiddenLink(text) && !seenValues.has(text)) {
+      seenValues.add(text);
+      found.push(text);
+    }
+    return;
+  }
+
+  if (typeof value !== "object") {
+    return;
+  }
+
+  if (seenObjects.has(value)) {
+    return;
+  }
+  seenObjects.add(value);
+
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 100)) {
+      collectLinkMetadataText(item, found, seenValues, seenObjects, depth + 1);
+      if (found.length >= 20) return;
+    }
+    return;
+  }
+
+  for (const item of Object.values(value as Record<string, unknown>)) {
+    collectLinkMetadataText(item, found, seenValues, seenObjects, depth + 1);
+    if (found.length >= 20) return;
+  }
 }
 
 function allow(reason: AntispamDecisionReason): AntispamDecision {

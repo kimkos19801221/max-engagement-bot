@@ -99,6 +99,44 @@ describe("LocalEngagementRepository MAX update import", () => {
     expect(await repository.listUnprocessedChatMessages(importedChannel!.id)).toHaveLength(0);
   });
 
+  it("imports hidden chat message links from formatting metadata", async () => {
+    const repository = await createTempRepository();
+    await repository.resetDemoData();
+    const chatId = -77530014631232;
+
+    await repository.importMaxUpdates([{
+      update_type: "message_created",
+      timestamp: 1_800_000_100_000,
+      chat_id: chatId,
+      message: {
+        sender: { user_id: 778, first_name: "Анна", is_bot: false },
+        recipient: { chat_id: chatId, chat_type: "chat" },
+        timestamp: 1_800_000_100_000,
+        body: {
+          mid: "chat-mid-hidden-link",
+          text: "Рыбалка | Клевое Место",
+          format: {
+            entities: [
+              {
+                type: "link",
+                url: "https://example.com/join"
+              }
+            ]
+          }
+        }
+      }
+    }]);
+
+    const data = await repository.read();
+    const importedChannel = data.channels.find((channel) => channel.maxChannelId === String(chatId));
+    const messages = await repository.listUnprocessedChatMessages(importedChannel!.id);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0].text).toBe("Рыбалка | Клевое Место");
+    expect(messages[0].linkedText).toContain("https://example.com/join");
+    expect(messages[0].metadataText).toContain("https://example.com/join");
+  });
+
 });
 
 async function createTempRepository(): Promise<LocalEngagementRepository> {

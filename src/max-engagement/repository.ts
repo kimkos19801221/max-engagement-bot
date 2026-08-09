@@ -15,6 +15,7 @@ import type {
   MaxUpdate,
   TeasingLevel
 } from "./types.js";
+import { extractLinkMetadataText } from "./antispam.js";
 import { classifyPostText } from "./content-safety.js";
 import type { CityMemoryCandidate, CityMemoryIngestResult, CityMemorySearchResult } from "../city-memory/types.js";
 
@@ -1145,7 +1146,7 @@ export class MaxEngagementRepository implements EngagementRepository {
         text,
         posted_at: postedAt,
         linked_text:
-          message.link?.message?.body?.text?.trim() || null,
+          buildChatLinkText(message),
         reply_to_max_message_id:
           message.link?.mid ?? message.link?.message?.body?.mid ?? null
       };
@@ -1482,6 +1483,19 @@ function mapComment(
         ? row.posted_at
         : null
   };
+}
+
+function buildChatLinkText(message: NonNullable<MaxUpdate["message"]>): string | null {
+  const parts = [
+    message.link?.message?.body?.text?.trim() || null,
+    extractLinkMetadataText({
+      body: message.body,
+      url: message.url,
+      link: message.link
+    })
+  ].filter((item): item is string => Boolean(item));
+
+  return parts.length > 0 ? parts.join("\n") : null;
 }
 
 function mapPost(
