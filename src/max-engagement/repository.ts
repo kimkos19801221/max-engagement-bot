@@ -1068,35 +1068,46 @@ export class MaxEngagementRepository implements EngagementRepository {
      * Не добавляем community_type в insert:
      * такого столбца в текущей базе может ещё не быть.
      */
-    const { data, error } = await this.supabase
+    const row = {
+      max_channel_id: maxChannelId,
+      title:
+        isChat
+          ? `MAX чат ${maxChannelId}`
+          : `MAX канал ${maxChannelId}`,
+      channel_kind: isChat ? "moms" : "news",
+      enabled: isChat,
+      mode: isChat ? "suitable_messages" : "off",
+      antispam_enabled: false,
+      antispam_delete_links: true,
+      teasing_level: 1,
+      politics_teasing_level: 0,
+      bot_name: "Алина",
+      bot_signature: "- Алина",
+      dry_run: !isChat
+    };
+
+    let insertResult = await this.supabase
       .from("max_engagement_channels")
-      .insert({
-        max_channel_id: maxChannelId,
-        title:
-          isChat
-            ? `MAX чат ${maxChannelId}`
-            : `MAX канал ${maxChannelId}`,
-        channel_kind: isChat ? "moms" : "news",
-        enabled: isChat,
-        mode: isChat ? "suitable_messages" : "off",
-        antispam_enabled: false,
-        antispam_delete_links: true,
-        teasing_level: 1,
-        politics_teasing_level: 0,
-        bot_name: "Алина",
-        bot_signature: "- Алина",
-        dry_run: !isChat
-      })
+      .insert(row)
       .select("*")
       .single();
 
-    if (error) {
-      throw error;
+    if (insertResult.error && isMissingAntispamChannelColumnError(insertResult.error)) {
+      const { antispam_enabled, antispam_delete_links, ...compatibleRow } = row;
+      insertResult = await this.supabase
+        .from("max_engagement_channels")
+        .insert(compatibleRow)
+        .select("*")
+        .single();
+    }
+
+    if (insertResult.error) {
+      throw insertResult.error;
     }
 
     return {
       record: {
-        ...mapChannel(data as ChannelRow),
+        ...mapChannel(insertResult.data as ChannelRow),
         communityType
       },
       created: true
@@ -1574,6 +1585,11 @@ function listEnvContains(value: string, item: string): boolean {
 function isMissingLinkedTextColumnError(error: unknown): boolean {
   const message = error instanceof Error ? error.message : JSON.stringify(error);
   return message.includes("linked_text");
+}
+
+function isMissingAntispamChannelColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : JSON.stringify(error);
+  return message.includes("antispam_enabled") || message.includes("antispam_delete_links");
 }
 
 function getSenderName(
