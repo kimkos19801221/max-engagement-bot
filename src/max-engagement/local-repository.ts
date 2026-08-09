@@ -805,11 +805,12 @@ function upsertChannelFromUpdate(data: LocalDemoData, update: MaxUpdate): {
     id: randomUUID(),
     maxChannelId,
     title: communityType === "channel" ? `MAX канал ${maxChannelId}` : `MAX чат ${maxChannelId}`,
-    channelKind: "moms",
-    mode: communityType === "chat" ? "city_assistant" : "suitable_messages",
+    channelKind: communityType === "chat" ? "moms" : "news",
+    mode: communityType === "chat" ? "suitable_messages" : "off",
     communityType,
     teasingLevel: 1,
     politicsTeasingLevel: 0,
+    dryRun: communityType !== "chat",
     botName: "MAX Bot",
     botSignature: "- админ"
   });
@@ -1020,6 +1021,7 @@ function createChannel(input: {
   politicsTeasingLevel?: TeasingLevel;
   botName: string;
   botSignature: string;
+  dryRun?: boolean;
 }): MaxEngagementChannelRecord {
   return {
     ...input,
@@ -1032,7 +1034,7 @@ function createChannel(input: {
     initiativeLimitDay: 15,
     userTeaseLimitDay: 1,
     politicsTeasingLevel: input.politicsTeasingLevel ?? 0,
-    dryRun: true
+    dryRun: input.dryRun ?? true
   };
 }
 

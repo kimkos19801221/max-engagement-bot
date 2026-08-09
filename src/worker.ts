@@ -3,7 +3,7 @@ import { config as loadDotenv } from "dotenv";
 
 import { hasStopTrigger, looksLikeQuestion } from "./max-engagement/content-safety.js";
 import { generateDryRunDraft, generatePostInitiativeDraft } from "./max-engagement/draft-generator.js";
-import { analyzeCityMessage, generateCityReply } from "./max-engagement/city-assistant.js";
+import { analyzeCityMessage, buildFallbackCityReply, generateCityReply } from "./max-engagement/city-assistant.js";
 import { createMaxClientFromEnv } from "./max-engagement/max-client.js";
 import { MaxEngagementRepository, createSupabaseClientFromEnv, type EngagementRepository } from "./max-engagement/repository.js";
 import { decideEngagementAction } from "./max-engagement/safety.js";
@@ -57,7 +57,10 @@ export async function runDryRunWorker(
       const messages = await repository.listUnprocessedChatMessages(channel.id);
       result.chatMessages += messages.length;
       for (const message of messages) {
-        applyProcessedResult(result, await processChatMessage(repository, maxClient, channel, message));
+        applyProcessedResult(
+          result,
+          await processChatMessageSafely(repository, maxClient, channel, message)
+        );
       }
       continue;
     }
@@ -66,20 +69,52 @@ export async function runDryRunWorker(
     result.comments += comments.length;
 
     for (const comment of comments) {
-      applyProcessedResult(result, await processComment(repository, maxClient, channel, comment));
+      applyProcessedResult(
+        result,
+        await processCommentSafely(repository, maxClient, channel, comment)
+      );
     }
 
     const posts = await repository.listUnprocessedPosts(channel.id);
     result.posts += posts.length;
 
     for (const post of posts) {
-      applyProcessedResult(result, await processPost(repository, maxClient, channel, post));
+      applyProcessedResult(
+        result,
+        await processPostSafely(repository, maxClient, channel, post)
+      );
     }
   }
 
   return result;
 }
 
+async function processChatMessageSafely(
+  repository: EngagementRepository,
+  maxClient: MaxClient,
+  channel: MaxEngagementChannelRecord,
+  message: MaxEngagementChatMessageRecord
+): Promise<ProcessedResult> {
+  try {
+    return await processChatMessage(repository, maxClient, channel, message);
+  } catch (error) {
+    const errorMessage = formatWorkerError(error);
+    console.error(`[worker] chat_message_failed channel=${channel.id} message=${message.id}: ${errorMessage}`);
+
+    await createFailedActionSafely(repository, {
+      channelId: channel.id,
+      postId: null,
+      chatMessageId: message.id,
+      threadId: null,
+      triggerCommentId: null,
+      actionType: "reply",
+      safetyReason: "Chat message processing failed",
+      errorMessage
+    });
+    await markChatMessageProcessedSafely(repository, message.id);
+    return "failed";
+  }
+}
 
 async function processChatMessage(
   repository: EngagementRepository,
@@ -141,13 +176,13 @@ async function processChatMessage(
     plan = await analyzeCityMessage({ channel, message, recentMessages, replyToMessage, memoryPreview });
   } catch (error) {
     const reason = `OpenAI chat analysis skipped: ${error instanceof Error ? error.message : String(error)}`;
-    await repository.createBotAction({
-      channelId: channel.id, postId: null, chatMessageId: message.id, threadId: null, triggerCommentId: null,
-      actionType: "reply", status: "failed", requestedTeasingLevel: 0, finalTeasingLevel: 0,
-      safetyReason: reason, generatedText: null, requiresHumanReview: false, errorMessage: reason
+    return await createAndMaybePublishChatReply({
+      repository,
+      maxClient,
+      channel,
+      message,
+      draft: buildFallbackCityReply({ channel, message, reason })
     });
-    await repository.markChatMessageProcessed(message.id);
-    return "failed";
   }
 
   const hardBlockedRisk =
@@ -196,14 +231,32 @@ async function processChatMessage(
     draft = await generateCityReply({ channel, message, recentMessages: latestMessages, plan, memory });
   } catch (error) {
     const reason = `OpenAI final reply skipped: ${error instanceof Error ? error.message : String(error)}`;
-    await repository.createBotAction({
-      channelId: channel.id, postId: null, chatMessageId: message.id, threadId: null, triggerCommentId: null,
-      actionType: "reply", status: "failed", requestedTeasingLevel: 0, finalTeasingLevel: 0,
-      safetyReason: reason, generatedText: null, requiresHumanReview: false, errorMessage: reason
+    return await createAndMaybePublishChatReply({
+      repository,
+      maxClient,
+      channel,
+      message,
+      draft: buildFallbackCityReply({ channel, message, reason })
     });
-    await repository.markChatMessageProcessed(message.id);
-    return "failed";
   }
+
+  return await createAndMaybePublishChatReply({
+    repository,
+    maxClient,
+    channel,
+    message,
+    draft
+  });
+}
+
+async function createAndMaybePublishChatReply(input: {
+  repository: EngagementRepository;
+  maxClient: MaxClient;
+  channel: MaxEngagementChannelRecord;
+  message: MaxEngagementChatMessageRecord;
+  draft: { shouldReply: boolean; text: string; safetyReason: string };
+}): Promise<ProcessedResult> {
+  const { repository, maxClient, channel, message, draft } = input;
 
   if (!draft.shouldReply || !draft.text.trim()) {
     const isError = draft.safetyReason.startsWith("OpenAI API key") || draft.safetyReason.startsWith("OpenAI chat reply skipped");
@@ -245,6 +298,32 @@ async function processChatMessage(
   if (status === "posted") return "posted";
   if (status === "failed") return "failed";
   return "drafted";
+}
+
+async function processPostSafely(
+  repository: EngagementRepository,
+  maxClient: MaxClient,
+  channel: MaxEngagementChannelRecord,
+  post: MaxEngagementPostRecord
+): Promise<ProcessedResult> {
+  try {
+    return await processPost(repository, maxClient, channel, post);
+  } catch (error) {
+    const errorMessage = formatWorkerError(error);
+    console.error(`[worker] post_failed channel=${channel.id} post=${post.id}: ${errorMessage}`);
+
+    await createFailedActionSafely(repository, {
+      channelId: channel.id,
+      postId: post.id,
+      chatMessageId: null,
+      threadId: null,
+      triggerCommentId: null,
+      actionType: "initiative",
+      safetyReason: "Post processing failed",
+      errorMessage
+    });
+    return "failed";
+  }
 }
 
 async function processPost(
@@ -400,6 +479,32 @@ async function saveSkippedPostPreview(input: {
   });
 }
 
+async function processCommentSafely(
+  repository: EngagementRepository,
+  maxClient: MaxClient,
+  channel: MaxEngagementChannelRecord,
+  comment: MaxEngagementCommentRecord
+): Promise<ProcessedResult> {
+  try {
+    return await processComment(repository, maxClient, channel, comment);
+  } catch (error) {
+    const errorMessage = formatWorkerError(error);
+    console.error(`[worker] comment_failed channel=${channel.id} comment=${comment.id}: ${errorMessage}`);
+
+    await createFailedActionSafely(repository, {
+      channelId: channel.id,
+      postId: comment.postId,
+      chatMessageId: null,
+      threadId: comment.threadId,
+      triggerCommentId: comment.id,
+      actionType: "reply",
+      safetyReason: "Comment processing failed",
+      errorMessage
+    });
+    return "failed";
+  }
+}
+
 async function processComment(
   repository: EngagementRepository,
   maxClient: MaxClient,
@@ -522,6 +627,59 @@ function applyProcessedResult(result: WorkerResult, processed: ProcessedResult):
   if (processed === "failed") result.failed += 1;
 }
 
+async function createFailedActionSafely(
+  repository: EngagementRepository,
+  input: {
+    channelId: string;
+    postId: string | null;
+    chatMessageId: string | null;
+    threadId: string | null;
+    triggerCommentId: string | null;
+    actionType: "reply" | "initiative" | "moderate" | "stop_thread";
+    safetyReason: string;
+    errorMessage: string;
+  }
+): Promise<void> {
+  try {
+    await repository.createBotAction({
+      channelId: input.channelId,
+      postId: input.postId,
+      chatMessageId: input.chatMessageId,
+      threadId: input.threadId,
+      triggerCommentId: input.triggerCommentId,
+      actionType: input.actionType,
+      status: "failed",
+      requestedTeasingLevel: 0,
+      finalTeasingLevel: 0,
+      safetyReason: input.safetyReason,
+      generatedText: null,
+      requiresHumanReview: false,
+      errorMessage: input.errorMessage
+    });
+  } catch (error) {
+    console.error(`[worker] failed_action_write_failed: ${formatWorkerError(error)}`);
+  }
+}
+
+async function markChatMessageProcessedSafely(
+  repository: EngagementRepository,
+  messageId: string
+): Promise<void> {
+  try {
+    await repository.markChatMessageProcessed(messageId);
+  } catch (error) {
+    console.error(`[worker] mark_chat_message_processed_failed message=${messageId}: ${formatWorkerError(error)}`);
+  }
+}
+
+function formatWorkerError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
 function buildCommentContext(input: {
   channel: MaxEngagementChannelRecord;
   comment: MaxEngagementCommentRecord;
@@ -569,20 +727,29 @@ if (process.argv.includes("--loop")) {
 async function runLoop(): Promise<void> {
   const intervalMinutes = Number(process.env.MAX_ENGAGEMENT_POLL_MINUTES || 2);
   const intervalMs = Math.max(0.25, intervalMinutes) * 60 * 1000;
+  const errorDelayMs = Math.max(
+    1000,
+    Number(process.env.MAX_ENGAGEMENT_ERROR_DELAY_MS || 5000)
+  );
 
   while (true) {
-    const result = await runDryRunWorker();
-    console.log(
-      JSON.stringify(
-        {
-          at: new Date().toISOString(),
-          ...result
-        },
-        null,
-        2
-      )
-    );
-    await sleep(intervalMs);
+    try {
+      const result = await runDryRunWorker();
+      console.log(
+        JSON.stringify(
+          {
+            at: new Date().toISOString(),
+            ...result
+          },
+          null,
+          2
+        )
+      );
+      await sleep(intervalMs);
+    } catch (error) {
+      console.error(error instanceof Error ? error.stack ?? error.message : error);
+      await sleep(errorDelayMs);
+    }
   }
 }
 

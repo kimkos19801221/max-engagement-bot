@@ -88,7 +88,9 @@ describe("LocalEngagementRepository MAX update import", () => {
 
     expect(result.messages).toBe(1);
     expect(importedChannel?.communityType).toBe("chat");
-    expect(importedChannel?.mode).toBe("city_assistant");
+    expect(importedChannel?.channelKind).toBe("moms");
+    expect(importedChannel?.mode).toBe("suitable_messages");
+    expect(importedChannel?.dryRun).toBe(false);
     expect(data.posts.some((post) => post.maxPostId === "chat-mid-1")).toBe(false);
     expect(messages).toHaveLength(1);
     expect(messages[0].authorName).toBe("Анна");

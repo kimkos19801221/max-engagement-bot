@@ -28,6 +28,7 @@ export class MaxUpdatesClient {
       baseUrl?: string;
       caFile?: string;
       token?: string;
+      requestTimeoutMs?: number;
       fetchFn?: FetchLike;
     }
   ) {}
@@ -60,6 +61,12 @@ export class MaxUpdatesClient {
       url.searchParams.set("types", input.types.join(","));
     }
 
+    const requestTimeoutMs = Math.max(
+      Number(this.config.requestTimeoutMs ?? process.env.MAX_API_REQUEST_TIMEOUT_MS ?? 0),
+      (input.timeout ?? 0) * 1000 + 15_000,
+      30_000
+    );
+
     const response = this.config.fetchFn
       ? await this.config.fetchFn(url, {
           method: "GET",
@@ -67,7 +74,7 @@ export class MaxUpdatesClient {
             Authorization: token
           }
         })
-      : await requestText(url, token, this.config.caFile);
+      : await requestText(url, token, this.config.caFile, requestTimeoutMs);
 
     const text = await response.text();
 
@@ -90,14 +97,16 @@ export function createMaxUpdatesClientFromEnv(): MaxUpdatesClient {
   return new MaxUpdatesClient({
     baseUrl: process.env.MAX_API_BASE_URL,
     caFile: process.env.MAX_API_CA_FILE,
-    token: process.env.MAX_API_TOKEN
+    token: process.env.MAX_API_TOKEN,
+    requestTimeoutMs: Number(process.env.MAX_API_REQUEST_TIMEOUT_MS || 0)
   });
 }
 
 async function requestText(
   url: URL,
   token: string,
-  caFile?: string
+  caFile?: string,
+  timeoutMs = 30_000
 ): Promise<{
   ok: boolean;
   status: number;
@@ -141,6 +150,9 @@ async function requestText(
       }
     );
 
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`MAX API GET ${url.pathname} timed out after ${timeoutMs}ms`));
+    });
     req.on("error", reject);
     req.end();
   });

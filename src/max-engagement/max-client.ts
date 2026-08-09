@@ -23,7 +23,8 @@ export function createMaxClientFromEnv(): MaxClient {
   return new HttpMaxClient({
     baseUrl: process.env.MAX_API_BASE_URL,
     caFile: process.env.MAX_API_CA_FILE,
-    token: process.env.MAX_API_TOKEN
+    token: process.env.MAX_API_TOKEN,
+    requestTimeoutMs: Number(process.env.MAX_API_REQUEST_TIMEOUT_MS || 0)
   });
 }
 
@@ -85,7 +86,7 @@ export class MockMaxClient implements MaxClient {
 }
 
 class HttpMaxClient implements MaxClient {
-  constructor(private readonly config: { baseUrl?: string; caFile?: string; token?: string }) {}
+  constructor(private readonly config: { baseUrl?: string; caFile?: string; token?: string; requestTimeoutMs?: number }) {}
 
   async fetchPosts(): Promise<MaxApiPost[]> {
     throw new Error("MAX real post/comment ingestion is event-driven; use Webhook or Long Polling updates instead of fetchPosts");
@@ -150,6 +151,10 @@ class HttpMaxClient implements MaxClient {
     const caFile = resolveCaFile(this.config.caFile);
     const ca = caFile ? await readFile(caFile, "utf8") : undefined;
     const payload = body === undefined ? undefined : JSON.stringify(body);
+    const timeoutMs = Math.max(
+      Number(this.config.requestTimeoutMs ?? process.env.MAX_API_REQUEST_TIMEOUT_MS ?? 0),
+      30_000
+    );
 
     return await new Promise((resolve, reject) => {
       const req = httpsRequest(url, {
@@ -177,6 +182,9 @@ class HttpMaxClient implements MaxClient {
       });
 
       req.on("error", reject);
+      req.setTimeout(timeoutMs, () => {
+        req.destroy(new Error(`MAX API ${method} ${url.pathname} timed out after ${timeoutMs}ms`));
+      });
       if (payload !== undefined) {
         req.write(payload);
       }

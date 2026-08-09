@@ -1062,6 +1062,8 @@ export class MaxEngagementRepository implements EngagementRepository {
       };
     }
 
+    const isChat = communityType === "chat";
+
     /*
      * Не добавляем community_type в insert:
      * такого столбца в текущей базе может ещё не быть.
@@ -1071,17 +1073,17 @@ export class MaxEngagementRepository implements EngagementRepository {
       .insert({
         max_channel_id: maxChannelId,
         title:
-          communityType === "chat"
+          isChat
             ? `MAX чат ${maxChannelId}`
             : `MAX канал ${maxChannelId}`,
-        channel_kind: "news",
-        enabled: false,
-        mode: "off",
+        channel_kind: isChat ? "moms" : "news",
+        enabled: isChat,
+        mode: isChat ? "suitable_messages" : "off",
         teasing_level: 1,
         politics_teasing_level: 0,
-        bot_name: "MAX Bot",
-        bot_signature: "- админ",
-        dry_run: true
+        bot_name: "Алина",
+        bot_signature: "- Алина",
+        dry_run: !isChat
       })
       .select("*")
       .single();

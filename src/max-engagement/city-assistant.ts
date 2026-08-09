@@ -157,6 +157,70 @@ export type CityAssistantReply = {
   usedFactIds: string[];
 };
 
+export function buildFallbackCityReply(input: {
+  channel: MaxEngagementChannelRecord;
+  message: MaxEngagementChatMessageRecord;
+  reason: string;
+}): CityAssistantReply {
+  const text = input.message.text.trim();
+  const normalized = text.toLowerCase();
+  const botName = channelBotName(input.channel).toLowerCase();
+  const directMention = normalized.includes(botName);
+  const asksChat =
+    /(?:подскажите|посоветуйте|кто знает|что вы|как вы|где|куда|какой|какая|какие|\?)/i.test(text);
+
+  if (!directMention && !asksChat) {
+    return {
+      shouldReply: false,
+      text: "",
+      safetyReason: `Fallback skipped: message is not a clear request; ${input.reason}`,
+      usedFactIds: []
+    };
+  }
+
+  if (/(?:голов|мигрен|таблет|лекарств|болит|боль|температур|давлен)/i.test(normalized)) {
+    return {
+      shouldReply: true,
+      text: [
+        "С лекарствами лучше аккуратно: я бы не советовала конкретные таблетки в чате, особенно если есть беременность, ГВ, давление или другие симптомы.",
+        "Безопаснее уточнить у врача или фармацевта, а если боль сильная, необычная или не проходит - не тянуть с медпомощью.",
+        "Девочки, если делитесь опытом, пишите, пожалуйста, без назначений и с оговоркой, что помогло именно вам."
+      ].join(" "),
+      safetyReason: `Fallback medical-safe reply: ${input.reason}`,
+      usedFactIds: []
+    };
+  }
+
+  if (/(?:садик|садик[аиоеу]?|детск(?:ий|ого|ом)|школ|круж|секци)/i.test(normalized)) {
+    return {
+      shouldReply: true,
+      text: [
+        "Пока в базе нет конкретных рекомендаций по этому вопросу.",
+        "Лучше смотреть варианты по району, отзывам родителей и сходить лично посмотреть условия.",
+        "Девочки, кто может посоветовать проверенные варианты, напишите район, название и что понравилось или не понравилось - это поможет другим."
+      ].join(" "),
+      safetyReason: `Fallback local recommendation reply: ${input.reason}`,
+      usedFactIds: []
+    };
+  }
+
+  if (directMention) {
+    return {
+      shouldReply: true,
+      text: "Я здесь. Сейчас могу отвечать только в безопасном базовом режиме: если нужен совет по месту, услуге или варианту, напишите район и детали, а девочки смогут добавить свой опыт.",
+      safetyReason: `Fallback direct mention reply: ${input.reason}`,
+      usedFactIds: []
+    };
+  }
+
+  return {
+    shouldReply: true,
+    text: "Пока нет сохраненных рекомендаций по этому вопросу. Девочки, если у вас есть личный опыт или проверенные варианты, поделитесь деталями - название, район, контакты или что именно понравилось.",
+    safetyReason: `Fallback general request reply: ${input.reason}`,
+    usedFactIds: []
+  };
+}
+
 export async function analyzeCityMessage(input: {
   channel: MaxEngagementChannelRecord;
   message: MaxEngagementChatMessageRecord;

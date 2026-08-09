@@ -1,59 +1,34 @@
 # Timeweb Cloud deployment
 
-Главное правило: проект MAX engagement bot размещается отдельно от DecorRent. Без отдельного подтверждения владельца нельзя менять рабочую инфраструктуру DecorRent.
+The bot is deployed on the same Timeweb Cloud server that hosts DecorRent to save money.
+It must still run as an isolated Docker Compose project so it does not change or break DecorRent.
 
-## Что не трогаем
+## Target Layout
 
-- домен `decorrent.ru`;
-- Nginx-конфигурацию DecorRent;
-- Dockerfile и Docker Compose DecorRent;
-- команды сборки и запуска DecorRent;
-- переменные окружения DecorRent;
-- базу данных, migrations и Supabase-проект DecorRent;
-- сетевые настройки, порты и процессы PM2 DecorRent;
-- GitHub Actions и автоматический деплой DecorRent.
+- Server: existing DecorRent Timeweb Cloud server.
+- Remote directory: `/opt/max-engagement-bot`.
+- Compose project: `max-engagement-bot`.
+- Worker container: `max-engagement-bot-worker`.
+- Web container: `max-engagement-bot-web`.
+- Docker network: `max-engagement-bot-net`.
+- Env file: `/opt/max-engagement-bot/.env.timeweb`.
 
-## Изолированный запуск
+Do not reuse DecorRent container names, networks, env files, ports, PM2 processes, or compose project names.
 
-Compose-файл этого проекта использует отдельные имена:
+## Do Not Touch
 
-- compose project: `max-engagement-bot`;
-- worker container: `max-engagement-bot-worker`;
-- web container: `max-engagement-bot-web`;
-- network: `max-engagement-bot-net`;
-- env file: `.env.timeweb`.
+- DecorRent domain and Nginx config.
+- DecorRent Dockerfile and Docker Compose files.
+- DecorRent PM2/systemd processes.
+- DecorRent environment variables.
+- DecorRent database, migrations, or Supabase project.
+- DecorRent GitHub Actions or deploy automation.
 
-Запуск:
+The bot can share the same VM, CPU, RAM, and Docker daemon. It should not share app-level runtime configuration.
 
-```bash
-powershell -ExecutionPolicy Bypass -File scripts/prepare-timeweb-env.ps1
-docker compose -p max-engagement-bot -f docker-compose.timeweb.yml config
-docker compose -p max-engagement-bot -f docker-compose.timeweb.yml up -d --build
-docker compose -p max-engagement-bot -f docker-compose.timeweb.yml ps
-```
+## Deploy
 
-`worker` запускает постоянный long polling `npm run max:watch`, хранит marker в Supabase и обрабатывает все включенные чаты через `channel_id`. `web` запускает админку и MAX webhook endpoint внутри Docker-сети на `4317`, но не публикует порт наружу. Это сделано специально, чтобы не менять общую сетевую конфигурацию сервера без согласования.
-
-## Обязательные переменные
-
-- `SUPABASE_URL`;
-- `SUPABASE_SECRET_KEY` или `SUPABASE_SERVICE_ROLE_KEY`;
-- `ENGAGEMENT_STORAGE=supabase`;
-- `MAX_API_BASE_URL=https://platform-api2.max.ru`;
-- `MAX_API_MODE=http`;
-- `MAX_API_TOKEN`;
-- `OPENAI_API_KEY`;
-- `ADMIN_SECRET`.
-
-`ADMIN_SECRET` защищает админку через HTTP Basic или `Authorization: Bearer <secret>`.
-
-`MAX_WEBHOOK_URL` и `MAX_WEBHOOK_SECRET` нужны только если включается webhook-режим. Для текущего Timeweb-запуска достаточно long polling.
-
-`MAX_WEBHOOK_SECRET` должен совпадать с `secret` в MAX webhook subscription. Сервер проверяет заголовок `X-Max-Bot-Api-Secret`.
-
-## Выкладка по SSH
-
-На локальной машине:
+From the local project:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/prepare-timeweb-env.ps1
@@ -61,52 +36,71 @@ powershell -ExecutionPolicy Bypass -File scripts/build-timeweb-package.ps1
 powershell -ExecutionPolicy Bypass -File scripts/deploy-timeweb-ssh.ps1 -HostName <TIMEWEB_IP> -User root
 ```
 
-Если SSH-доступ по ключу не настроен, команда остановится на `Permission denied`.
-Тогда нужно добавить публичный ключ в Timeweb Cloud или временно подключиться
-паролем и настроить ключ вручную.
-
-## Webhook
-
-Локальный endpoint приложения:
-
-```text
-POST /webhooks/max
-```
-
-Production URL должен быть HTTPS endpoint на 443 порту, например:
-
-```text
-https://bot.example.ru/webhooks/max
-```
-
-После появления внешнего HTTPS-адреса:
+The deploy script uploads the archive and `.env.timeweb`, then runs:
 
 ```bash
-npm run max:webhook:list
-npm run max:webhook:subscribe
+cd /opt/max-engagement-bot
+docker compose -p max-engagement-bot -f docker-compose.timeweb.yml up -d --build
+docker compose -p max-engagement-bot -f docker-compose.timeweb.yml ps
 ```
 
-Если нужно снять подписку:
+## Runtime
+
+- `worker` runs `npm run max:watch` with long polling.
+- `web` runs the admin server on port `4317` inside Docker only.
+- No host port is published by default.
+- Worker writes heartbeat to `.local-data/runtime/max-poll-heartbeat.json`.
+- Worker healthcheck fails if heartbeat is stale.
+
+## Required Env
+
+Required in `.env.timeweb`:
+
+```text
+ENGAGEMENT_STORAGE=supabase
+MAX_API_BASE_URL=https://platform-api2.max.ru
+MAX_API_MODE=http
+MAX_API_TOKEN=...
+SUPABASE_URL=...
+SUPABASE_SECRET_KEY=...
+OPENAI_API_KEY=...
+ADMIN_SECRET=...
+```
+
+Useful stability settings:
+
+```text
+MAX_UPDATES_TIMEOUT=25
+MAX_POLL_IDLE_DELAY_MS=1000
+MAX_POLL_ERROR_DELAY_MS=5000
+MAX_API_REQUEST_TIMEOUT_MS=45000
+MAX_POLL_WATCHDOG_MS=120000
+MAX_WORKER_HEARTBEAT_MAX_AGE_MS=180000
+```
+
+## Checks On Server
 
 ```bash
-npm run max:webhook:delete
+cd /opt/max-engagement-bot
+docker compose -p max-engagement-bot -f docker-compose.timeweb.yml ps
+docker compose -p max-engagement-bot -f docker-compose.timeweb.yml logs --tail=100 worker
+docker compose -p max-engagement-bot -f docker-compose.timeweb.yml exec worker node scripts/check-worker-health.mjs
 ```
 
-## Боевой переключатель
+Expected worker logs include stages like:
 
-До финального включения все каналы должны оставаться с `dry_run=true`. Реальная публикация комментариев включается отдельно, после проверки:
+```text
+[max-poll] step=get_marker
+[max-poll] step=get_updates
+[max-poll] step=import_updates
+[max-poll] step=worker
+```
 
-- `npm run max:verify` показывает, что бот состоит в нужных чатах;
-- у live-чатов есть право `write`;
-- Supabase пишет посты и комментарии;
-- worker создаёт draft/queued actions;
-- админка защищена `ADMIN_SECRET`;
-- тестовый канал проверен отдельно от основного канала.
+## Stop Only The Bot
 
-Текущая безопасная схема:
+```bash
+cd /opt/max-engagement-bot
+docker compose -p max-engagement-bot -f docker-compose.timeweb.yml down
+```
 
-- чаты/каналы различаются по `community_type` и внутреннему `channel_id`;
-- сообщения обычных чатов пишутся в `max_engagement_chat_messages`;
-- публикации каналов пишутся в `max_engagement_posts`;
-- `max_engagement_runtime_state` хранит MAX polling marker;
-- `city_memory_*` хранит изолированную городскую память.
+This must not stop DecorRent containers.

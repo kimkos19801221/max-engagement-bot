@@ -18,6 +18,7 @@ RUN apk add --no-cache curl
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json package-lock.json tsconfig.json ./
 COPY src ./src
+COPY scripts ./scripts
 COPY certs ./certs
 
 EXPOSE 3000
