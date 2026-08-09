@@ -66,6 +66,8 @@ export type MaxEngagementChannelSettings = {
   communityType?: MaxCommunityType;
 
   enabled: boolean;
+  antispamEnabled: boolean;
+  antispamDeleteLinks: boolean;
   mode: MaxEngagementMode;
   teasingLevel: TeasingLevel;
   level3Acknowledged: boolean;
@@ -163,6 +165,7 @@ export type MaxEngagementChatMessageRecord = {
    * mid сообщения, на которое отвечает участник.
    */
   replyToMaxMessageId: string | null;
+  linkedText?: string | null;
 
   /*
    * После создания bot action сообщение считается обработанным.
@@ -221,6 +224,19 @@ export type MaxSendChatMessageResult = {
   messageId: string;
 };
 
+export type MaxChatAdmin = {
+  userId: string | null;
+  isAdmin: boolean;
+  isOwner: boolean;
+  isBot: boolean;
+  permissions: string[];
+};
+
+export type MaxDeleteMessageInput = {
+  chatId: string;
+  messageId: string;
+};
+
 export type MaxClient = {
   fetchPosts(
     channel: MaxEngagementChannelRecord
@@ -239,6 +255,14 @@ export type MaxClient = {
     channelId: string,
     commentId: string
   ): Promise<void>;
+
+  deleteChatMessage(
+    input: MaxDeleteMessageInput
+  ): Promise<void>;
+
+  listChatAdmins(
+    chatId: string
+  ): Promise<MaxChatAdmin[]>;
 
   sendChatMessage(
     input: MaxSendChatMessageInput

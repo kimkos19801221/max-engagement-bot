@@ -4,6 +4,7 @@ import { config as loadDotenv } from "dotenv";
 import { hasStopTrigger, looksLikeQuestion } from "./max-engagement/content-safety.js";
 import { generateDryRunDraft, generatePostInitiativeDraft } from "./max-engagement/draft-generator.js";
 import { analyzeCityMessage, buildFallbackCityReply, generateCityReply } from "./max-engagement/city-assistant.js";
+import { moderateChatMessage } from "./max-engagement/antispam.js";
 import { createMaxClientFromEnv } from "./max-engagement/max-client.js";
 import { MaxEngagementRepository, createSupabaseClientFromEnv, type EngagementRepository } from "./max-engagement/repository.js";
 import { decideEngagementAction } from "./max-engagement/safety.js";
@@ -127,7 +128,38 @@ async function processChatMessage(
     return "skipped";
   }
 
-  if (message.authorIsBot || !message.text.trim()) {
+  if (!message.text.trim()) {
+    await repository.markChatMessageProcessed(message.id);
+    return "skipped";
+  }
+
+  const antispam = await moderateChatMessage({
+    channel,
+    message,
+    maxClient
+  });
+
+  if (antispam.shouldStopPipeline) {
+    await repository.createBotAction({
+      channelId: channel.id,
+      postId: null,
+      chatMessageId: message.id,
+      threadId: null,
+      triggerCommentId: null,
+      actionType: "moderate",
+      status: antispam.deleteSucceeded ? "deleted" : "failed",
+      requestedTeasingLevel: 0,
+      finalTeasingLevel: 0,
+      safetyReason: antispam.deleteSucceeded ? "blocked_link/delete_success" : "blocked_link/delete_failed",
+      generatedText: null,
+      requiresHumanReview: false,
+      errorMessage: antispam.errorMessage ?? null
+    });
+    await repository.markChatMessageProcessed(message.id);
+    return antispam.deleteSucceeded ? "skipped" : "failed";
+  }
+
+  if (message.authorIsBot) {
     await repository.markChatMessageProcessed(message.id);
     return "skipped";
   }

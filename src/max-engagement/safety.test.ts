@@ -7,6 +7,8 @@ import type { MaxEngagementChannelSettings, MaxEngagementPostContext } from "./t
 const baseSettings: MaxEngagementChannelSettings = {
   channelKind: "news",
   enabled: true,
+  antispamEnabled: false,
+  antispamDeleteLinks: true,
   mode: "suitable_messages",
   teasingLevel: 2,
   level3Acknowledged: false,

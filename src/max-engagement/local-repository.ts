@@ -759,7 +759,11 @@ function normalizeLocalDemoData(data: Partial<LocalDemoData>): LocalDemoData {
       marker: data.maxPolling?.marker ?? null,
       importedUpdateKeys: Array.isArray(data.maxPolling?.importedUpdateKeys) ? data.maxPolling.importedUpdateKeys : []
     },
-    channels: data.channels ?? seed.channels,
+    channels: (data.channels ?? seed.channels).map((channel) => ({
+      ...channel,
+      antispamEnabled: channel.antispamEnabled ?? false,
+      antispamDeleteLinks: channel.antispamDeleteLinks ?? true
+    })),
     posts: data.posts ?? seed.posts,
     threads: data.threads ?? seed.threads,
     comments: data.comments ?? seed.comments,
@@ -910,21 +914,12 @@ function upsertChatMessageCreatedUpdate(data: LocalDemoData, channel: MaxEngagem
     text,
     postedAt,
     replyToMaxMessageId: message.link?.mid ?? message.link?.message?.body?.mid ?? null,
+    linkedText: message.link?.message?.body?.text?.trim() || null,
     processedAt: existing?.processedAt ?? null
   };
   if (existing) Object.assign(existing, next);
   else data.chatMessages.push(next);
 
-  if (!next.authorIsBot) {
-    ingestMessageIntoCityMemory(data, {
-      channel,
-      sourceType: "comment",
-      sourceId: next.maxMessageId,
-      authorName: next.authorName,
-      text: next.text,
-      receivedAt: next.postedAt
-    });
-  }
   return true;
 }
 
@@ -1026,6 +1021,8 @@ function createChannel(input: {
   return {
     ...input,
     enabled: true,
+    antispamEnabled: false,
+    antispamDeleteLinks: true,
     level3Acknowledged: false,
     level3ReviewPolicy: "draft_required",
     replyLimitHour: 20,

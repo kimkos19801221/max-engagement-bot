@@ -6,7 +6,9 @@ import { resolve } from "node:path";
 import type {
   MaxApiComment,
   MaxApiPost,
+  MaxChatAdmin,
   MaxClient,
+  MaxDeleteMessageInput,
   MaxEngagementChannelRecord,
   MaxPublishCommentInput,
   MaxPublishCommentResult,
@@ -80,6 +82,14 @@ export class MockMaxClient implements MaxClient {
     return;
   }
 
+  async deleteChatMessage(): Promise<void> {
+    return;
+  }
+
+  async listChatAdmins(): Promise<MaxChatAdmin[]> {
+    return [];
+  }
+
   async sendChatMessage(input: MaxSendChatMessageInput): Promise<MaxSendChatMessageResult> {
     return { messageId: `mock-chat:${input.chatId}:${Date.now()}` };
   }
@@ -117,6 +127,26 @@ class HttpMaxClient implements MaxClient {
 
   async deleteOwnComment(): Promise<void> {
     throw new Error("MAX deleteOwnComment needs the real message id mapping and must be enabled only after live posting is approved");
+  }
+
+  async deleteChatMessage(input: MaxDeleteMessageInput): Promise<void> {
+    const result = await this.request<{ success?: boolean; message?: string }>(
+      "DELETE",
+      `/messages?message_id=${encodeURIComponent(input.messageId)}`
+    );
+
+    if (result.success === false) {
+      throw new Error(`MAX message delete failed: ${result.message || "success=false"}`);
+    }
+  }
+
+  async listChatAdmins(chatId: string): Promise<MaxChatAdmin[]> {
+    const result = await this.request<{ members?: unknown[] }>(
+      "GET",
+      `/chats/${encodeURIComponent(chatId)}/members/admins`
+    );
+
+    return (Array.isArray(result.members) ? result.members : []).map(mapChatAdmin);
   }
 
   async sendChatMessage(input: MaxSendChatMessageInput): Promise<MaxSendChatMessageResult> {
@@ -191,6 +221,22 @@ class HttpMaxClient implements MaxClient {
       req.end();
     });
   }
+}
+
+function mapChatAdmin(value: unknown): MaxChatAdmin {
+  const row = (value && typeof value === "object") ? value as Record<string, unknown> : {};
+  const userId =
+    row.user_id ??
+    row.id ??
+    (row.user && typeof row.user === "object" ? (row.user as Record<string, unknown>).user_id : undefined);
+
+  return {
+    userId: userId === undefined || userId === null ? null : String(userId),
+    isAdmin: row.is_admin !== false,
+    isOwner: Boolean(row.is_owner),
+    isBot: Boolean(row.is_bot),
+    permissions: Array.isArray(row.permissions) ? row.permissions.map(String) : []
+  };
 }
 
 function resolveCaFile(configured?: string): string | undefined {

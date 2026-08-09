@@ -9,6 +9,8 @@ const channel: MaxEngagementChannelRecord = {
   title: "Тестовый канал",
   channelKind: "moms",
   enabled: true,
+  antispamEnabled: false,
+  antispamDeleteLinks: true,
   mode: "suitable_messages",
   teasingLevel: 1,
   level3Acknowledged: false,

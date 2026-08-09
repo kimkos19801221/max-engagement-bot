@@ -73,6 +73,8 @@ type ChannelSettings = {
   title: string;
   channel_kind: "moms" | "news";
   enabled: boolean;
+  antispam_enabled: boolean;
+  antispam_delete_links: boolean;
   mode: string;
   bot_name: string | null;
   bot_signature: string | null;
@@ -492,9 +494,7 @@ async function getAnalyticsSummary(): Promise<AnalyticsSummary> {
 async function listChannels(): Promise<{ channels: ChannelSettings[] }> {
   const { data, error } = await supabase
     .from("max_engagement_channels")
-    .select(
-      "id, max_channel_id, title, channel_kind, enabled, mode, bot_name, bot_signature, tone, emoji_level, humor_level, teasing_level, level_3_acknowledged_at, level_3_review_policy, working_hours_enabled, working_hours_timezone, working_hours_start, working_hours_end, answer_delay_min_seconds, answer_delay_max_seconds, reply_limit_hour, reply_limit_day, initiative_limit_hour, initiative_limit_day, user_tease_limit_day, politics_teasing_level, dry_run"
-    )
+    .select("*")
     .order("updated_at", { ascending: false });
 
   if (error) {
@@ -582,6 +582,8 @@ async function updateChannel(id: string, body: unknown): Promise<{ ok: true }> {
 
   const patch = {
     enabled: Boolean(input.enabled),
+    antispam_enabled: Boolean(input.antispam_enabled),
+    antispam_delete_links: Boolean(input.antispam_delete_links),
     dry_run: Boolean(input.dry_run),
     title: requiredString(input.title, "title"),
     channel_kind: enumString(input.channel_kind, ["moms", "news"], "channel_kind"),
@@ -618,10 +620,24 @@ async function updateChannel(id: string, body: unknown): Promise<{ ok: true }> {
 
   const { error } = await supabase.from("max_engagement_channels").update(patch).eq("id", id);
   if (error) {
+    if (isMissingAntispamColumnError(error)) {
+      const { antispam_enabled, antispam_delete_links, ...compatiblePatch } = patch;
+      const retry = await supabase.from("max_engagement_channels").update(compatiblePatch).eq("id", id);
+      if (!retry.error) {
+        console.warn("[admin] antispam settings were not saved because Supabase migration 005_chat_antispam is not applied");
+        return { ok: true };
+      }
+      throw retry.error;
+    }
     throw error;
   }
 
   return { ok: true };
+}
+
+function isMissingAntispamColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : JSON.stringify(error);
+  return message.includes("antispam_enabled") || message.includes("antispam_delete_links");
 }
 
 async function listStyleExamples(channelId: string | null): Promise<{ examples: StyleExample[] }> {
@@ -1355,6 +1371,8 @@ function renderDashboard(): string {
             \${field("Начало работы", "working_hours_start", normalizeTime(channel.working_hours_start), "time")}
             \${field("Конец работы", "working_hours_end", normalizeTime(channel.working_hours_end), "time")}
             <div class="field"><label>Включен</label><div class="check-row"><input name="enabled" type="checkbox" \${channel.enabled ? "checked" : ""}> <span>бот активен</span></div></div>
+            <div class="field"><label>Антиспам</label><div class="check-row"><input name="antispam_enabled" type="checkbox" \${channel.antispam_enabled ? "checked" : ""}> <span>включен для этого чата</span></div></div>
+            <div class="field"><label>Ссылки</label><div class="check-row"><input name="antispam_delete_links" type="checkbox" \${channel.antispam_delete_links ? "checked" : ""}> <span>удалять ссылки участников</span></div></div>
             <div class="field"><label>Dry-run</label><div class="check-row"><input name="dry_run" type="checkbox" \${channel.dry_run ? "checked" : ""}> <span>не публиковать в MAX</span></div></div>
             <div class="field"><label>Рабочее время</label><div class="check-row"><input name="working_hours_enabled" type="checkbox" \${channel.working_hours_enabled ? "checked" : ""}> <span>учитывать расписание</span></div></div>
             <div class="field full">

@@ -31,7 +31,7 @@ export type BotActionInput = {
   threadId: string | null;
   triggerCommentId: string | null;
   actionType: "reply" | "initiative" | "moderate" | "stop_thread";
-  status: "draft" | "queued" | "skipped" | "posted" | "failed";
+  status: "draft" | "queued" | "skipped" | "posted" | "failed" | "deleted";
   requestedTeasingLevel: TeasingLevel;
   finalTeasingLevel: TeasingLevel;
   safetyReason: string;
@@ -1079,6 +1079,8 @@ export class MaxEngagementRepository implements EngagementRepository {
         channel_kind: isChat ? "moms" : "news",
         enabled: isChat,
         mode: isChat ? "suitable_messages" : "off",
+        antispam_enabled: false,
+        antispam_delete_links: true,
         teasing_level: 1,
         politics_teasing_level: 0,
         bot_name: "Алина",
@@ -1120,28 +1122,39 @@ export class MaxEngagementRepository implements EngagementRepository {
           ? new Date(message.timestamp).toISOString()
           : new Date(update.timestamp ?? Date.now()).toISOString();
 
+      const row = {
+        channel_id: channel.id,
+        max_message_id: String(messageId),
+        author_user_id:
+          senderId === undefined || senderId === null
+            ? null
+            : String(senderId),
+        author_name: getSenderName(message.sender),
+        author_is_bot: Boolean(message.sender?.is_bot),
+        text,
+        posted_at: postedAt,
+        linked_text:
+          message.link?.message?.body?.text?.trim() || null,
+        reply_to_max_message_id:
+          message.link?.mid ?? message.link?.message?.body?.mid ?? null
+      };
+
       const { error } = await this.supabase
         .from("max_engagement_chat_messages")
-        .upsert(
-          {
-            channel_id: channel.id,
-            max_message_id: String(messageId),
-            author_user_id:
-              senderId === undefined || senderId === null
-                ? null
-                : String(senderId),
-            author_name: getSenderName(message.sender),
-            author_is_bot: Boolean(message.sender?.is_bot),
-            text,
-            posted_at: postedAt,
-            reply_to_max_message_id:
-              message.link?.mid ?? message.link?.message?.body?.mid ?? null
-          },
-          { onConflict: "channel_id,max_message_id", ignoreDuplicates: true }
-        );
+        .upsert(row, { onConflict: "channel_id,max_message_id", ignoreDuplicates: true });
 
       if (error) {
-        throw error;
+        if (isMissingLinkedTextColumnError(error)) {
+          const { linked_text, ...compatibleRow } = row;
+          const retry = await this.supabase
+            .from("max_engagement_chat_messages")
+            .upsert(compatibleRow, { onConflict: "channel_id,max_message_id", ignoreDuplicates: true });
+          if (retry.error) {
+            throw retry.error;
+          }
+        } else {
+          throw error;
+        }
       }
 
       return true;
@@ -1336,6 +1349,14 @@ function mapChannel(
     communityType:
       inferCommunityType(row),
     enabled: Boolean(row.enabled),
+    antispamEnabled:
+      row.antispam_enabled === undefined
+        ? envEnablesAntispam(String(row.max_channel_id))
+        : Boolean(row.antispam_enabled),
+    antispamDeleteLinks:
+      row.antispam_delete_links === undefined
+        ? envEnablesAntispamDeleteLinks(String(row.max_channel_id))
+        : Boolean(row.antispam_delete_links),
     mode:
       row.mode as MaxEngagementMode,
     teasingLevel:
@@ -1411,6 +1432,8 @@ function mapChatMessage(
       typeof row.reply_to_max_message_id === "string"
         ? row.reply_to_max_message_id
         : null,
+    linkedText:
+      typeof row.linked_text === "string" ? row.linked_text : null,
     processedAt:
       typeof row.processed_at === "string" ? row.processed_at : null
   };
@@ -1515,6 +1538,42 @@ function inferCommunityType(
   return title.startsWith("max чат")
     ? "chat"
     : "channel";
+}
+
+function envEnablesAntispam(maxChannelId: string): boolean {
+  const value = process.env.MAX_ANTISPAM_ENABLED_CHAT_IDS || "";
+  return listEnvContains(value, maxChannelId);
+}
+
+function envEnablesAntispamDeleteLinks(maxChannelId: string): boolean {
+  const value = process.env.MAX_ANTISPAM_DELETE_LINKS_CHAT_IDS;
+  if (!value) {
+    return true;
+  }
+
+  return listEnvContains(value, maxChannelId);
+}
+
+function listEnvContains(value: string, item: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  if (["1", "true", "yes", "all", "*"].includes(normalized)) {
+    return true;
+  }
+
+  return normalized
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .includes(item.toLowerCase());
+}
+
+function isMissingLinkedTextColumnError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : JSON.stringify(error);
+  return message.includes("linked_text");
 }
 
 function getSenderName(

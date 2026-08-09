@@ -36,6 +36,8 @@ function createChannel(): MaxEngagementChannelRecord {
     channelKind: "moms",
     communityType: "chat",
     enabled: true,
+    antispamEnabled: false,
+    antispamDeleteLinks: true,
     mode: "suitable_messages",
     teasingLevel: 1,
     level3Acknowledged: false,
