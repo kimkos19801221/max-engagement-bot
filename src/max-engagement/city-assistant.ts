@@ -22,6 +22,9 @@ const REQUEST_SCOPES = ["local", "global", "mixed"] as const;
 const RISKS = ["none", "medical", "personal_data", "accusation", "advertising", "unverified_treatment", "other"] as const;
 const RISK_BEHAVIORS = ["normal", "silent", "careful_reply", "moderation_review"] as const;
 
+// Risks that must never be surfaced publicly regardless of what the model set should_reply to.
+const UNSAFE_RISKS = new Set<typeof RISKS[number]>(["personal_data", "accusation", "unverified_treatment"]);
+
 const ORCHESTRATOR_FORMAT: StructuredOutputFormat = {
   name: "orchestrator_decision",
   schema: {
@@ -66,7 +69,8 @@ const ORCHESTRATOR_FORMAT: StructuredOutputFormat = {
                 enum: ["address", "contact", "service", "hours", "event", "temporary_change", "resident_recommendation", "correction", "summary"]
               },
               content: { type: "string" },
-              confidence: { type: "number" },
+              // Bounded in the schema and validated again at runtime.
+              confidence: { type: "number", minimum: 0, maximum: 1 },
               valid_until: {
                 anyOf: [{ type: "string" }, { type: "null" }]
               }
@@ -183,8 +187,7 @@ export function buildFallbackCityReply(input: {
       shouldReply: true,
       text: [
         "С лекарствами лучше аккуратно: я бы не советовала конкретные таблетки в чате, особенно если есть беременность, ГВ, давление или другие симптомы.",
-        "Безопаснее уточнить у врача или фармацевта, а если боль сильная, необычная или не проходит - не тянуть с медпомощью.",
-        "Девочки, если делитесь опытом, пишите, пожалуйста, без назначений и с оговоркой, что помогло именно вам."
+        "Безопаснее уточнить у врача или фармацевта, а если боль сильная, необычная или не проходит - не тянуть с медпомощью."
       ].join(" "),
       safetyReason: `Fallback medical-safe reply: ${input.reason}`,
       usedFactIds: []
@@ -215,7 +218,7 @@ export function buildFallbackCityReply(input: {
 
   return {
     shouldReply: true,
-    text: "Пока нет сохраненных рекомендаций по этому вопросу. Девочки, если у вас есть личный опыт или проверенные варианты, поделитесь деталями - название, район, контакты или что именно понравилось.",
+    text: "Пока нет сохраненных рекомендаций по этому вопросу.",
     safetyReason: `Fallback general request reply: ${input.reason}`,
     usedFactIds: []
   };
@@ -285,7 +288,10 @@ export async function generateCityReply(input: {
     instructions: FINAL_REPLY_PROMPT,
     input: [
       `ЧАТ: ${input.channel.title}`,
-      `РЕШЕНИЕ ОРКЕСТРАТОРА: ${JSON.stringify(input.plan)}`,
+      // Serialized in snake_case to match the field names FINAL_REPLY_PROMPT actually
+      // refers to (e.g. "request_scope"). Passing the raw camelCase TS object here
+      // previously meant the prompt's field references didn't line up with the JSON keys.
+      `РЕШЕНИЕ ОРКЕСТРАТОРА: ${JSON.stringify(planToPromptRecord(input.plan))}`,
       "АКТУАЛЬНЫЕ ПОСЛЕДНИЕ СООБЩЕНИЯ:",
       formatHistory(input.channel, input.recentMessages, input.message.id, 30) || "История отсутствует.",
       "РАЗРЕШЁННЫЕ ФАКТЫ ИЗ ГОРОДСКОЙ ПАМЯТИ:",
@@ -358,10 +364,10 @@ const FINAL_REPLY_PROMPT = [
   "Сначала проверь актуальные сообщения: если участницы уже полноценно ответили или ответ Алины будет лишним, выбери should_publish=false.",
   "Смотри на request_scope в решении оркестратора. Для global разрешено использовать общие знания модели, потому что ответ не зависит от города. Для local любые конкретные местные факты разрешено брать только из переданного списка фактов. Для mixed общую часть можно дать из знаний модели, а любые местные организации, адреса, контакты, цены, графики, события и рекомендации — только из переданных фактов.",
   "Отвечай по существу и формулируй ответ уверенно, без лишних оговорок, даже если в базе пока мало источников. При этом не выдумывай факты и не скрывай характер имеющихся данных: если это рекомендация участницы — подавай её как рекомендацию, если это подтверждённая информация — как факт.",
-  "Если подходящих сведений в базе пока нет, коротко скажи об этом и сразу предложи участницам добавить полезные варианты по теме, чтобы эта информация помогала при следующих похожих вопросах.",
-  "После каждого содержательного ответа коротко приглашай участниц дополнять общую базу по этой теме. Новые варианты, уточнения, изменения и альтернативы полезны всегда, даже если ответ уже есть.",
-  "Смысл призыва — показать пользу для сообщества: опыт, которым участницы делятся сейчас, сможет помочь другим участницам в будущем.",
-  "Призыв должен быть связан с темой ответа и по возможности подсказывать, что именно полезно добавить: другой вариант, контакт, адрес, цену, график, изменение, личный опыт или уточнение.",
+  "Просить участниц дополнить информацию нужно НЕ после каждого ответа. Делай это только для local или локальной части mixed-запроса, когда для полезного ответа не хватает конкретных городских сведений или когда действительно нужно собрать дополнительные проверяемые локальные данные для городской памяти.",
+  "Для global-запросов, общих бытовых вопросов, общих знаний, воспитания, товаров и обычных медицинских вопросов не добавляй автоматический призыв «делитесь опытом», если он не нужен непосредственно для ответа.",
+  "Если подходящих local-сведений в базе нет, коротко скажи об этом и попроси участниц добавить именно недостающие конкретные сведения: название специалиста или организации, район, адрес, контакты, график, цену, услугу, местное изменение или проверенный опыт обращения.",
+  "Не проси абстрактно «поделиться опытом» ради активности. Если полноценный ответ уже дан из общих знаний модели, просто закончи ответ без искусственного вопроса к чату.",
   "Не начинай ответ с приветствия, если разговор уже идёт. Не используй формальные вступления вроде «Добрый день», «Здравствуйте» или «К сожалению».",
   "Пиши как обычная участница чата, а не как служба поддержки или официальный администратор.",
   "Не повторяй вопрос пользователя. Не обращайся по имени без необходимости.",
@@ -372,6 +378,44 @@ const FINAL_REPLY_PROMPT = [
   "Верни строго JSON без markdown: {\"should_publish\":boolean,\"reply\":string,\"used_fact_ids\":string[],\"unsupported_local_claims\":boolean,\"reason\":string}.",
   "Если unsupported_local_claims=true, обязательно should_publish=false и reply пустая строка."
 ].join("\n");
+
+// Converts the internal camelCase plan back to the snake_case shape that
+// ORCHESTRATOR_FORMAT/ORCHESTRATOR_PROMPT actually describe, so the field
+// names referenced inside FINAL_REPLY_PROMPT (e.g. "request_scope") match
+// what's literally present in the JSON handed to the model.
+function planToPromptRecord(plan: CityAssistantPlan): Record<string, unknown> {
+  return {
+    message_type: plan.messageType,
+    request_target: plan.requestTarget,
+    request_scope: plan.requestScope,
+    action: plan.action,
+    should_reply: plan.shouldReply,
+    should_search_memory: plan.shouldSearchMemory,
+    should_save_memory: plan.shouldSaveMemory,
+    category: plan.category,
+    subcategory: plan.subcategory,
+    search_terms: plan.searchTerms,
+    clarification_question: plan.clarificationQuestion,
+    risk: plan.risk,
+    risk_behavior: plan.riskBehavior,
+    already_answered_by_participants: plan.alreadyAnsweredByParticipants,
+    intervention_useful: plan.interventionUseful,
+    reason: plan.reason,
+    memory_candidate: plan.memoryCandidate
+      ? {
+          object_type: plan.memoryCandidate.objectType,
+          object_name: plan.memoryCandidate.objectName,
+          aliases: plan.memoryCandidate.aliases,
+          categories: plan.memoryCandidate.categories,
+          related_terms: plan.memoryCandidate.relatedTerms,
+          knowledge_kind: plan.memoryCandidate.knowledgeKind,
+          content: plan.memoryCandidate.content,
+          confidence: plan.memoryCandidate.confidence,
+          valid_until: plan.memoryCandidate.validUntil
+        }
+      : null
+  };
+}
 
 function parsePlan(text: string): CityAssistantPlan {
   const value = parseStrictJson(text);
@@ -395,14 +439,37 @@ function parsePlan(text: string): CityAssistantPlan {
   const rawCandidate = value.memory_candidate;
   const candidate = rawCandidate === null ? null : parseCandidate(objectValue(rawCandidate, "memory_candidate"));
 
-  const shouldSaveMemory = booleanValue(value.should_save_memory, "should_save_memory") && candidate !== null;
+  // --- Code-level safety guardrails (do not rely on the model following the prompt) ---
+
+  // Fail closed without throwing: one inconsistent model decision must not break the worker.
+  // Personal data, accusations and unverified treatment are never published, searched in
+  // city memory, or saved as city-memory facts.
+  const unsafeRisk = UNSAFE_RISKS.has(risk);
+
+  let shouldReply = booleanValue(value.should_reply, "should_reply");
+  if (unsafeRisk || riskBehavior === "silent" || riskBehavior === "moderation_review") {
+    shouldReply = false;
+  }
+
+  // Global requests must never trigger a city-memory search. Unsafe content is also kept
+  // out of memory-search flow so it cannot be propagated through local context.
+  let shouldSearchMemory = booleanValue(value.should_search_memory, "should_search_memory");
+  if (requestScope === "global" || unsafeRisk) {
+    shouldSearchMemory = false;
+  }
+
+  // Unsafe content must never enter city memory even if the model returned a candidate.
+  const shouldSaveMemory =
+    !unsafeRisk &&
+    booleanValue(value.should_save_memory, "should_save_memory") &&
+    candidate !== null;
   return {
     messageType,
     requestTarget,
     requestScope,
     action,
-    shouldReply: booleanValue(value.should_reply, "should_reply"),
-    shouldSearchMemory: booleanValue(value.should_search_memory, "should_search_memory"),
+    shouldReply,
+    shouldSearchMemory,
     shouldSaveMemory,
     category: stringValue(value.category, "category", 120),
     subcategory: stringValue(value.subcategory, "subcategory", 120),
@@ -511,7 +578,9 @@ function booleanValue(value: unknown, field: string): boolean {
 }
 
 function numberValue(value: unknown, field: string, min: number, max: number): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) throw new Error(`${field} must be a number from ${min} to ${max}`);
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`${field} must be a number from ${min} to ${max}`);
+  }
   return value;
 }
 
@@ -585,4 +654,4 @@ function extractText(data: OpenAIResponse): string {
   return (data.output ?? []).flatMap((item) => item.content ?? [])
     .filter((item) => item.type === "output_text" && typeof item.text === "string")
     .map((item) => item.text).join("\n");
-    }
+}
