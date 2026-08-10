@@ -169,6 +169,12 @@ export type MaxEngagementChatMessageRecord = {
   metadataText?: string | null;
 
   /*
+   * Сырые attachments входящего MAX-сообщения. Нужны в том числе для
+   * contact-card сообщений, у которых text может быть пустым.
+   */
+  rawAttachments?: unknown[];
+
+  /*
    * После создания bot action сообщение считается обработанным.
    */
   processedAt?: string | null;

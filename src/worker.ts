@@ -5,6 +5,7 @@ import { hasStopTrigger, looksLikeQuestion } from "./max-engagement/content-safe
 import { generateDryRunDraft, generatePostInitiativeDraft } from "./max-engagement/draft-generator.js";
 import { analyzeCityMessage, buildFallbackCityReply, generateCityReply } from "./max-engagement/city-assistant.js";
 import { moderateChatMessage } from "./max-engagement/antispam.js";
+import { classifyProfessionalContactAttachment, hasRawAttachments } from "./max-engagement/contact-directory.js";
 import { createMaxClientFromEnv } from "./max-engagement/max-client.js";
 import { MaxEngagementRepository, createSupabaseClientFromEnv, type EngagementRepository } from "./max-engagement/repository.js";
 import { decideEngagementAction } from "./max-engagement/safety.js";
@@ -128,7 +129,7 @@ async function processChatMessage(
     return "skipped";
   }
 
-  if (!message.text.trim()) {
+  if (!message.text.trim() && !hasRawAttachments(message)) {
     await repository.markChatMessageProcessed(message.id);
     return "skipped";
   }
@@ -175,6 +176,38 @@ async function processChatMessage(
   if (!modeAllows || channel.mode === "moderation_only" || channel.mode === "off") {
     await repository.markChatMessageProcessed(message.id);
     return "skipped";
+  }
+
+  /*
+   * Отдельный тихий pipeline для карточек контактов специалистов.
+   * Он выполняется до reply-rate-limit: сохранение контакта не является публичным ответом.
+   * Сырые attachments уже сохранены repository, поэтому даже неизвестный формат MAX
+   * не теряется и может быть изучен позже.
+   */
+  if (hasRawAttachments(message)) {
+    try {
+      const contactContext = await repository.listRecentChatMessages(channel.id, message.postedAt, 12);
+      const candidate = await classifyProfessionalContactAttachment({
+        channel,
+        message,
+        recentMessages: contactContext
+      });
+
+      if (candidate) {
+        await repository.saveContactDirectoryCandidate({ channel, message, candidate });
+        await repository.markChatMessageProcessed(message.id);
+        return "skipped";
+      }
+    } catch (error) {
+      console.error(`[worker] contact_directory_save_skipped channel=${channel.id} message=${message.id}: ${formatWorkerError(error)}`);
+    }
+
+    // Contact-only/attachment-only messages should never fall through into the normal
+    // text assistant if the contact classifier did not confidently classify them.
+    if (!message.text.trim()) {
+      await repository.markChatMessageProcessed(message.id);
+      return "skipped";
+    }
   }
 
   const [replyCountHour, replyCountDay, recentMessages] = await Promise.all([

@@ -18,6 +18,8 @@ import type {
 import { extractLinkMetadataText } from "./antispam.js";
 import { classifyPostText } from "./content-safety.js";
 import type { CityMemoryCandidate, CityMemoryIngestResult, CityMemorySearchResult } from "../city-memory/types.js";
+import type { ContactDirectoryCandidate } from "./contact-directory.js";
+import { normalizeCategory, normalizePhone } from "./contact-directory.js";
 
 type ChannelRow = Record<string, unknown>;
 type CommentRow = Record<string, unknown>;
@@ -103,6 +105,12 @@ export type EngagementRepository = {
     receivedAt?: string | null;
     candidate: CityMemoryCandidate;
   }): Promise<CityMemoryIngestResult>;
+
+  saveContactDirectoryCandidate(input: {
+    channel: MaxEngagementChannelRecord;
+    message: MaxEngagementChatMessageRecord;
+    candidate: ContactDirectoryCandidate;
+  }): Promise<void>;
 
   listUnprocessedPosts(
     channelId: string,
@@ -632,6 +640,103 @@ export class MaxEngagementRepository implements EngagementRepository {
     return { sources: 1, objects: objectCreated, knowledge: knowledgeChanged, blocked: 0, revisions: 0 };
   }
 
+  async saveContactDirectoryCandidate(input: {
+    channel: MaxEngagementChannelRecord;
+    message: MaxEngagementChatMessageRecord;
+    candidate: ContactDirectoryCandidate;
+  }): Promise<void> {
+    const cityName = inferRepositoryCityName(input.channel);
+    const { data: city, error: cityError } = await this.supabase
+      .from("city_memory_cities")
+      .upsert({ name: cityName }, { onConflict: "name" })
+      .select("id")
+      .single();
+    if (cityError) throw cityError;
+
+    const { data: publicRow, error: publicError } = await this.supabase
+      .from("city_memory_publics")
+      .upsert({
+        city_id: city.id,
+        channel_id: input.channel.id,
+        title: input.channel.title
+      }, { onConflict: "city_id,channel_id" })
+      .select("id")
+      .single();
+    if (publicError) throw publicError;
+
+    const normalizedPhone = normalizePhone(input.candidate.phone);
+    const normalizedCategory = normalizeCategory(input.candidate.category);
+    const now = input.message.postedAt ?? new Date().toISOString();
+
+    let existingQuery = this.supabase
+      .from("city_contact_directory")
+      .select("id, times_shared");
+
+    if (input.candidate.maxContactId) {
+      existingQuery = existingQuery
+        .eq("channel_id", input.channel.id)
+        .eq("max_contact_id", input.candidate.maxContactId);
+    } else if (normalizedPhone) {
+      existingQuery = existingQuery
+        .eq("channel_id", input.channel.id)
+        .eq("normalized_phone", normalizedPhone);
+    } else {
+      existingQuery = existingQuery
+        .eq("channel_id", input.channel.id)
+        .eq("attachment_fingerprint", input.candidate.attachmentFingerprint);
+    }
+
+    const { data: existingRows, error: lookupError } = await existingQuery.limit(1);
+    if (lookupError) throw lookupError;
+    const existing = existingRows?.[0];
+
+    if (existing) {
+      const { error } = await this.supabase
+        .from("city_contact_directory")
+        .update({
+          category: input.candidate.category,
+          normalized_category: normalizedCategory,
+          contact_name: input.candidate.contactName,
+          phone: input.candidate.phone,
+          normalized_phone: normalizedPhone,
+          max_contact_id: input.candidate.maxContactId,
+          raw_attachment: input.candidate.rawAttachment,
+          source_message_id: input.message.maxMessageId,
+          source_author_name: input.message.authorName,
+          source_context: input.candidate.sourceContext,
+          last_seen_at: now,
+          times_shared: Number(existing.times_shared ?? 1) + 1,
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", existing.id);
+      if (error) throw error;
+      return;
+    }
+
+    const { error } = await this.supabase
+      .from("city_contact_directory")
+      .insert({
+        city_id: city.id,
+        public_id: publicRow.id,
+        channel_id: input.channel.id,
+        category: input.candidate.category,
+        normalized_category: normalizedCategory,
+        contact_name: input.candidate.contactName,
+        phone: input.candidate.phone,
+        normalized_phone: normalizedPhone,
+        max_contact_id: input.candidate.maxContactId,
+        attachment_fingerprint: input.candidate.attachmentFingerprint,
+        raw_attachment: input.candidate.rawAttachment,
+        source_message_id: input.message.maxMessageId,
+        source_author_name: input.message.authorName,
+        source_context: input.candidate.sourceContext,
+        first_seen_at: now,
+        last_seen_at: now,
+        times_shared: 1
+      });
+    if (error) throw error;
+  }
+
   async listUnprocessedSubscriberComments(
     channelId: string,
     limit = 50
@@ -1156,10 +1261,11 @@ export class MaxEngagementRepository implements EngagementRepository {
   ): Promise<boolean> {
     if (update.message?.recipient?.chat_type === "chat") {
       const message = update.message;
-      const text = message?.body?.text?.trim();
+      const text = message?.body?.text?.trim() ?? "";
       const messageId = message?.body?.mid;
+      const attachments = Array.isArray(message?.body?.attachments) ? message.body.attachments : [];
 
-      if (!message || !messageId || !text) {
+      if (!message || !messageId || (!text && attachments.length === 0)) {
         return false;
       }
 
@@ -1179,6 +1285,7 @@ export class MaxEngagementRepository implements EngagementRepository {
         author_name: getSenderName(message.sender),
         author_is_bot: Boolean(message.sender?.is_bot),
         text,
+        attachments,
         posted_at: postedAt,
         linked_text:
           buildChatLinkText(message),
@@ -1472,7 +1579,8 @@ function mapChatMessage(
     authorName:
       typeof row.author_name === "string" ? row.author_name : null,
     authorIsBot: Boolean(row.author_is_bot),
-    text: String(row.text),
+    text: typeof row.text === "string" ? row.text : "",
+    rawAttachments: Array.isArray(row.attachments) ? row.attachments : [],
     postedAt:
       typeof row.posted_at === "string" ? row.posted_at : null,
     replyToMaxMessageId:

@@ -4,6 +4,8 @@ import { dirname, resolve } from "node:path";
 
 import { createEmptyCityMemoryState, ingestCityMemory, ingestCityMemoryCandidate, normalizeCityMemoryState, searchCityMemory, summarizeCityMemory } from "../city-memory/local-store.js";
 import type { CityMemoryCandidate, CityMemoryIngestResult, CityMemorySearchResult, CityMemoryState } from "../city-memory/types.js";
+import type { ContactDirectoryCandidate } from "./contact-directory.js";
+import { normalizeCategory, normalizePhone } from "./contact-directory.js";
 import { extractLinkMetadataText } from "./antispam.js";
 import { classifyPostText } from "./content-safety.js";
 import type { BotActionInput, EngagementRepository } from "./repository.js";
@@ -64,6 +66,25 @@ export type LocalToxicityEventRecord = {
   createdAt: string;
 };
 
+export type LocalContactDirectoryRecord = {
+  id: string;
+  channelId: string;
+  category: string;
+  normalizedCategory: string;
+  contactName: string | null;
+  phone: string | null;
+  normalizedPhone: string | null;
+  maxContactId: string | null;
+  attachmentFingerprint: string;
+  rawAttachment: unknown;
+  sourceMessageId: string;
+  sourceAuthorName: string | null;
+  sourceContext: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  timesShared: number;
+};
+
 export type LocalDemoData = {
   maxPolling: {
     marker: number | null;
@@ -82,6 +103,7 @@ export type LocalDemoData = {
   threads: MaxEngagementThreadRecord[];
   comments: MaxEngagementCommentRecord[];
   chatMessages: MaxEngagementChatMessageRecord[];
+  contactDirectory: LocalContactDirectoryRecord[];
   actions: LocalBotActionRecord[];
   styleExamples: LocalStyleExampleRecord[];
   toxicityEvents: LocalToxicityEventRecord[];
@@ -624,6 +646,58 @@ export class LocalEngagementRepository implements EngagementRepository {
     return result ?? { sources: 0, objects: 0, knowledge: 0, blocked: 0, revisions: 0 };
   }
 
+  async saveContactDirectoryCandidate(input: {
+    channel: MaxEngagementChannelRecord;
+    message: MaxEngagementChatMessageRecord;
+    candidate: ContactDirectoryCandidate;
+  }): Promise<void> {
+    await this.update((data) => {
+      const normalizedPhone = normalizePhone(input.candidate.phone);
+      const normalizedCategory = normalizeCategory(input.candidate.category);
+      const existing = data.contactDirectory.find((item) =>
+        item.channelId === input.channel.id && (
+          (input.candidate.maxContactId && item.maxContactId === input.candidate.maxContactId) ||
+          (!input.candidate.maxContactId && normalizedPhone && item.normalizedPhone === normalizedPhone) ||
+          (!input.candidate.maxContactId && !normalizedPhone && item.attachmentFingerprint === input.candidate.attachmentFingerprint)
+        )
+      );
+      const now = input.message.postedAt ?? new Date().toISOString();
+      if (existing) {
+        existing.category = input.candidate.category;
+        existing.normalizedCategory = normalizedCategory;
+        existing.contactName = input.candidate.contactName;
+        existing.phone = input.candidate.phone;
+        existing.normalizedPhone = normalizedPhone;
+        existing.maxContactId = input.candidate.maxContactId;
+        existing.rawAttachment = input.candidate.rawAttachment;
+        existing.sourceMessageId = input.message.maxMessageId;
+        existing.sourceAuthorName = input.message.authorName;
+        existing.sourceContext = input.candidate.sourceContext;
+        existing.lastSeenAt = now;
+        existing.timesShared += 1;
+        return;
+      }
+      data.contactDirectory.push({
+        id: randomUUID(),
+        channelId: input.channel.id,
+        category: input.candidate.category,
+        normalizedCategory,
+        contactName: input.candidate.contactName,
+        phone: input.candidate.phone,
+        normalizedPhone,
+        maxContactId: input.candidate.maxContactId,
+        attachmentFingerprint: input.candidate.attachmentFingerprint,
+        rawAttachment: input.candidate.rawAttachment,
+        sourceMessageId: input.message.maxMessageId,
+        sourceAuthorName: input.message.authorName,
+        sourceContext: input.candidate.sourceContext,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        timesShared: 1
+      });
+    });
+  }
+
   async searchCityMemory(input: {
     cityName?: string | null;
     channelId?: string | null;
@@ -721,6 +795,7 @@ export function createSeedData(): LocalDemoData {
       createThread(tragedyThreadId, newsChannelId, tragedyPostId, "max-demo-news-thread-2")
     ],
     chatMessages: [],
+    contactDirectory: [],
     comments: [
       createComment(momsChannelId, momsPostId, momsThreadId, "max-demo-comment-1", "demo-user-1", "Анна", "А если ребенок вообще не спит днем, это нормально?", now),
       createComment(newsChannelId, newsPostId, newsThreadId, "max-demo-comment-2", "demo-user-2", "Игорь", "Ну конечно, площадку открыли, а лавочки опять забыли.", now),
@@ -769,6 +844,7 @@ function normalizeLocalDemoData(data: Partial<LocalDemoData>): LocalDemoData {
     threads: data.threads ?? seed.threads,
     comments: data.comments ?? seed.comments,
     chatMessages: data.chatMessages ?? [],
+    contactDirectory: data.contactDirectory ?? [],
     actions: data.actions ?? [],
     styleExamples: data.styleExamples ?? seed.styleExamples,
     toxicityEvents: data.toxicityEvents ?? [],
@@ -905,9 +981,10 @@ function upsertMessageCreatedUpdate(data: LocalDemoData, channel: MaxEngagementC
 
 function upsertChatMessageCreatedUpdate(data: LocalDemoData, channel: MaxEngagementChannelRecord, update: MaxUpdate): boolean {
   const message = update.message;
-  const text = message?.body?.text?.trim();
+  const text = message?.body?.text?.trim() ?? "";
   const messageId = message?.body?.mid;
-  if (!message || !messageId || !text) return false;
+  const attachments = Array.isArray(message?.body?.attachments) ? message.body.attachments : [];
+  if (!message || !messageId || (!text && attachments.length === 0)) return false;
 
   const postedAt = typeof message.timestamp === "number"
     ? new Date(message.timestamp).toISOString()
@@ -922,6 +999,7 @@ function upsertChatMessageCreatedUpdate(data: LocalDemoData, channel: MaxEngagem
     authorName,
     authorIsBot: message.sender?.is_bot === true || Boolean(channel.botName && authorName === channel.botName),
     text,
+    rawAttachments: attachments,
     postedAt,
     replyToMaxMessageId: message.link?.mid ?? message.link?.message?.body?.mid ?? null,
     linkedText: buildChatLinkText(message),
