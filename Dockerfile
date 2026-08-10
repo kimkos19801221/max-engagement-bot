@@ -23,4 +23,4 @@ COPY certs ./certs
 
 EXPOSE 3000
 
-CMD ["npm", "run", "timeweb"]
+CMD ["npm", "run", "web"]
