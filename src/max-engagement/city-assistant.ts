@@ -166,60 +166,13 @@ export function buildFallbackCityReply(input: {
   message: MaxEngagementChatMessageRecord;
   reason: string;
 }): CityAssistantReply {
-  const text = input.message.text.trim();
-  const normalized = text.toLowerCase();
-  const botName = channelBotName(input.channel).toLowerCase();
-  const directMention = normalized.includes(botName);
-  const asksChat =
-    /(?:подскажите|посоветуйте|кто знает|что вы|как вы|где|куда|какой|какая|какие|\?)/i.test(text);
-
-  if (!directMention && !asksChat) {
-    return {
-      shouldReply: false,
-      text: "",
-      safetyReason: `Fallback skipped: message is not a clear request; ${input.reason}`,
-      usedFactIds: []
-    };
-  }
-
-  if (/(?:голов|мигрен|таблет|лекарств|болит|боль|температур|давлен)/i.test(normalized)) {
-    return {
-      shouldReply: true,
-      text: [
-        "С лекарствами лучше аккуратно: я бы не советовала конкретные таблетки в чате, особенно если есть беременность, ГВ, давление или другие симптомы.",
-        "Безопаснее уточнить у врача или фармацевта, а если боль сильная, необычная или не проходит - не тянуть с медпомощью."
-      ].join(" "),
-      safetyReason: `Fallback medical-safe reply: ${input.reason}`,
-      usedFactIds: []
-    };
-  }
-
-  if (/(?:садик|садик[аиоеу]?|детск(?:ий|ого|ом)|школ|круж|секци)/i.test(normalized)) {
-    return {
-      shouldReply: true,
-      text: [
-        "Пока в базе нет конкретных рекомендаций по этому вопросу.",
-        "Лучше смотреть варианты по району, отзывам родителей и сходить лично посмотреть условия.",
-        "Девочки, кто может посоветовать проверенные варианты, напишите район, название и что понравилось или не понравилось - это поможет другим."
-      ].join(" "),
-      safetyReason: `Fallback local recommendation reply: ${input.reason}`,
-      usedFactIds: []
-    };
-  }
-
-  if (directMention) {
-    return {
-      shouldReply: true,
-      text: "Я здесь. Сейчас могу отвечать только в безопасном базовом режиме: если нужен совет по месту, услуге или варианту, напишите район и детали, а девочки смогут добавить свой опыт.",
-      safetyReason: `Fallback direct mention reply: ${input.reason}`,
-      usedFactIds: []
-    };
-  }
-
+  // Fail silent: if the main AI pipeline cannot produce a safe answer,
+  // do not publish canned/template replies into the group chat.
+  // Normal city-memory analysis/saving is handled by the main pipeline when it is available.
   return {
-    shouldReply: true,
-    text: "Пока нет сохраненных рекомендаций по этому вопросу.",
-    safetyReason: `Fallback general request reply: ${input.reason}`,
+    shouldReply: false,
+    text: "",
+    safetyReason: `Fallback silent: ${input.reason}`,
     usedFactIds: []
   };
 }

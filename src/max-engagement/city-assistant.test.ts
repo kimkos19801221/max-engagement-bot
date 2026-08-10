@@ -4,27 +4,28 @@ import { buildFallbackCityReply } from "./city-assistant.js";
 import type { MaxEngagementChannelRecord, MaxEngagementChatMessageRecord } from "./types.js";
 
 describe("buildFallbackCityReply", () => {
-  it("uses a medical-safe reply for headache medication requests", () => {
+  it("stays silent for medication requests when the main AI pipeline is unavailable", () => {
     const reply = buildFallbackCityReply({
       channel: createChannel(),
-      message: createMessage("Девочки подскажите что вы пьете от головы"),
+      message: createMessage("girls, what do you take for headache?"),
       reason: "OpenAI unavailable"
     });
 
-    expect(reply.shouldReply).toBe(true);
-    expect(reply.text).toContain("не советовала конкретные таблетки");
-    expect(reply.text).toContain("врача или фармацевта");
+    expect(reply.shouldReply).toBe(false);
+    expect(reply.text).toBe("");
+    expect(reply.safetyReason).toContain("Fallback silent");
   });
 
-  it("answers direct bot mentions in basic mode", () => {
+  it("stays silent for direct bot mentions when the main AI pipeline is unavailable", () => {
     const reply = buildFallbackCityReply({
       channel: createChannel(),
-      message: createMessage("Алина ты здесь?"),
+      message: createMessage("Alina are you here?"),
       reason: "OpenAI unavailable"
     });
 
-    expect(reply.shouldReply).toBe(true);
-    expect(reply.text).toContain("Я здесь");
+    expect(reply.shouldReply).toBe(false);
+    expect(reply.text).toBe("");
+    expect(reply.safetyReason).toContain("Fallback silent");
   });
 });
 
@@ -32,7 +33,7 @@ function createChannel(): MaxEngagementChannelRecord {
   return {
     id: "channel-1",
     maxChannelId: "-1",
-    title: "Тест чат",
+    title: "Test chat",
     channelKind: "moms",
     communityType: "chat",
     enabled: true,
@@ -49,7 +50,7 @@ function createChannel(): MaxEngagementChannelRecord {
     userTeaseLimitDay: 1,
     politicsTeasingLevel: 0,
     dryRun: false,
-    botName: "Алина"
+    botName: "Alina"
   };
 }
 
@@ -59,7 +60,7 @@ function createMessage(text: string): MaxEngagementChatMessageRecord {
     channelId: "channel-1",
     maxMessageId: "mid-1",
     authorUserId: "user-1",
-    authorName: "Дмитрий",
+    authorName: "Dmitry",
     authorIsBot: false,
     text,
     postedAt: new Date(0).toISOString(),
