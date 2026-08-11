@@ -1643,7 +1643,7 @@ function mapChannel(
     antispamEnabled:
       row.antispam_enabled === undefined
         ? envEnablesAntispam(String(row.max_channel_id))
-        : Boolean(row.antispam_enabled),
+        : Boolean(row.antispam_enabled) || envEnablesAntispam(String(row.max_channel_id)),
     antispamDeleteLinks:
       row.antispam_delete_links === undefined
         ? envEnablesAntispamDeleteLinks(String(row.max_channel_id))
