@@ -351,13 +351,12 @@ async function createAndMaybePublishChatReply(input: {
 
   if (!draft.shouldReply || !draft.text.trim()) {
     const isError = draft.safetyReason.startsWith("OpenAI API key") || draft.safetyReason.startsWith("OpenAI chat reply skipped");
-    if (isError) {
-      await repository.createBotAction({
-        channelId: channel.id, postId: null, chatMessageId: message.id, threadId: null, triggerCommentId: null,
-        actionType: "reply", status: "failed", requestedTeasingLevel: 0, finalTeasingLevel: 0,
-        safetyReason: draft.safetyReason, generatedText: null, requiresHumanReview: false, errorMessage: draft.safetyReason
-      });
-    }
+    await repository.createBotAction({
+      channelId: channel.id, postId: null, chatMessageId: message.id, threadId: null, triggerCommentId: null,
+      actionType: "reply", status: isError ? "failed" : "skipped", requestedTeasingLevel: 0, finalTeasingLevel: 0,
+      safetyReason: draft.safetyReason, generatedText: null, requiresHumanReview: false,
+      errorMessage: isError ? draft.safetyReason : null
+    });
     await repository.markChatMessageProcessed(message.id);
     return isError ? "failed" : "skipped";
   }

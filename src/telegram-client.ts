@@ -87,6 +87,23 @@ export class TelegramClient implements ChatClient {
   }
 
   private async call<T>(method: string, payload: Record<string, unknown>): Promise<T> {
+    const maxAttempts = Math.max(1, Number(process.env.TELEGRAM_HTTP_RETRY_ATTEMPTS || 3));
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await this.callOnce<T>(method, payload);
+      } catch (error) {
+        lastError = error;
+        if (attempt >= maxAttempts || !isRetryableTelegramError(error)) break;
+        await delay(Math.min(1000 * attempt, 3000));
+      }
+    }
+
+    throw lastError;
+  }
+
+  private async callOnce<T>(method: string, payload: Record<string, unknown>): Promise<T> {
     const controller = new AbortController();
     const timeoutMs = Math.max(30_000, Number(process.env.TELEGRAM_HTTP_TIMEOUT_MS || 45_000));
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -128,4 +145,13 @@ function normalizeTelegramMessageId(value: string): number {
     throw new Error(`Invalid Telegram message id: ${value}`);
   }
   return numeric;
+}
+
+function isRetryableTelegramError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  return error.name === "AbortError" || error.message === "fetch failed";
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
