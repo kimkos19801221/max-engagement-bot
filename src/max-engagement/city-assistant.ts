@@ -1,18 +1,12 @@
 import type { CityMemorySearchResult, CityMemoryCandidate } from "../city-memory/types.js";
 import type { MaxEngagementChannelRecord, MaxEngagementChatMessageRecord } from "./types.js";
-
-type OpenAIResponse = {
-  output_text?: string;
-  output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
-  error?: { message?: string };
-};
+import { requestOpenAIResponses, type OpenAIResponsesData } from "./openai-responses.js";
 
 type StructuredOutputFormat = {
   name: string;
   schema: Record<string, unknown>;
 };
 
-const OPENAI_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4.1-mini";
 
 const ACTIONS = ["ignore", "clarify", "search", "save", "search_and_save", "reply_without_search"] as const;
@@ -616,10 +610,9 @@ async function requestOpenAI(input: {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 45_000);
   try {
-    const response = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${input.apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
+    const data = await requestOpenAIResponses({
+      apiKey: input.apiKey,
+      payload: {
         model: process.env.OPENAI_MODEL?.trim() || DEFAULT_MODEL,
         instructions: input.instructions,
         input: input.input,
@@ -635,11 +628,9 @@ async function requestOpenAI(input: {
               }
             }
           : undefined
-      }),
+      },
       signal: controller.signal
     });
-    const data = await response.json() as OpenAIResponse;
-    if (!response.ok) throw new Error(data.error?.message || `OpenAI HTTP ${response.status}`);
     const text = extractText(data).trim();
     if (!text) throw new Error("OpenAI returned an empty response");
     return text;
@@ -648,7 +639,7 @@ async function requestOpenAI(input: {
   }
 }
 
-function extractText(data: OpenAIResponse): string {
+function extractText(data: OpenAIResponsesData): string {
   if (typeof data.output_text === "string") return data.output_text;
   return (data.output ?? []).flatMap((item) => item.content ?? [])
     .filter((item) => item.type === "output_text" && typeof item.text === "string")

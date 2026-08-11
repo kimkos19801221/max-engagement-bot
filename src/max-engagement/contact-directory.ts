@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { MaxEngagementChannelRecord, MaxEngagementChatMessageRecord } from "./types.js";
+import { requestOpenAIResponses, type OpenAIResponsesData } from "./openai-responses.js";
 
 export type ContactDirectoryCandidate = {
   category: string;
@@ -19,7 +20,6 @@ type ContactClassification = {
   reason: string;
 };
 
-const OPENAI_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4.1-mini";
 
 export function hasRawAttachments(message: MaxEngagementChatMessageRecord): boolean {
@@ -44,13 +44,13 @@ export async function classifyProfessionalContactAttachment(input: {
     .join("\n");
 
   const rawJson = safeJson(attachments).slice(0, 12_000);
-  const response = await fetch(OPENAI_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 45_000);
+  let data: OpenAIResponsesData;
+  try {
+    data = await requestOpenAIResponses({
+      apiKey,
+      payload: {
       model: process.env.OPENAI_MODEL?.trim() || DEFAULT_MODEL,
       instructions: [
         "Ты классификатор карточек контактов из городского группового чата MAX.",
@@ -90,14 +90,14 @@ export async function classifyProfessionalContactAttachment(input: {
           }
         }
       }
-    })
-  });
-
-  if (!response.ok) return null;
-  const data = await response.json() as {
-    output_text?: string;
-    output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
-  };
+      },
+      signal: controller.signal
+    });
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
   const text = extractOutputText(data).trim();
   if (!text) return null;
 

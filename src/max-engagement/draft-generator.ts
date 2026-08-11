@@ -7,16 +7,8 @@ import type {
   MaxEngagementPostRecord
 } from "./types.js";
 import type { CityMemorySearchResult } from "../city-memory/types.js";
+import { requestOpenAIResponses, type OpenAIResponsesData } from "./openai-responses.js";
 
-type OpenAIResponse = {
-  output_text?: string;
-  output?: Array<{
-    content?: Array<{ type?: string; text?: string }>;
-  }>;
-  error?: { message?: string };
-};
-
-const OPENAI_URL = "https://api.openai.com/v1/responses";
 const DEFAULT_MODEL = "gpt-4.1-mini";
 
 const ADMIN_LIKE_INITIATIVE_PATTERNS = [
@@ -352,29 +344,17 @@ async function requestOpenAI(input: {
   const timeout = setTimeout(() => controller.abort(), 25_000);
 
   try {
-    const response = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${input.apiKey}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
+    const data = await requestOpenAIResponses({
+      apiKey: input.apiKey,
+      payload: {
         model: process.env.OPENAI_MODEL?.trim() || DEFAULT_MODEL,
         instructions: input.instructions,
         input: input.input,
         max_output_tokens: 180,
         temperature: 0.7
-      }),
+      },
       signal: controller.signal
     });
-
-    const data = (await response.json()) as OpenAIResponse;
-
-    if (!response.ok) {
-      throw new Error(
-        data.error?.message || `OpenAI HTTP ${response.status}`
-      );
-    }
 
     const text = extractText(data).trim();
 
@@ -388,7 +368,7 @@ async function requestOpenAI(input: {
   }
 }
 
-function extractText(data: OpenAIResponse): string {
+function extractText(data: OpenAIResponsesData): string {
   if (typeof data.output_text === "string") {
     return data.output_text;
   }
