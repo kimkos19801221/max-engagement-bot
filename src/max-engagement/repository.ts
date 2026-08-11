@@ -19,8 +19,8 @@ import type { ChatPlatform, UnifiedChatMessage } from "../chat-transport/types.j
 import { extractLinkMetadataText } from "./antispam.js";
 import { classifyPostText } from "./content-safety.js";
 import type { CityMemoryCandidate, CityMemoryIngestResult, CityMemorySearchResult } from "../city-memory/types.js";
-import type { ContactDirectoryCandidate } from "./contact-directory.js";
-import { normalizeCategory, normalizePhone } from "./contact-directory.js";
+import type { ContactDirectoryCandidate, ContactDirectoryRecord, ContactDirectorySearchInput } from "./contact-directory.js";
+import { buildContactDirectorySearchTerms, normalizeCategory, normalizePhone, scoreContactDirectoryRecord } from "./contact-directory.js";
 
 type ChannelRow = Record<string, unknown>;
 type CommentRow = Record<string, unknown>;
@@ -116,6 +116,12 @@ export type EngagementRepository = {
     message: MaxEngagementChatMessageRecord;
     candidate: ContactDirectoryCandidate;
   }): Promise<void>;
+
+  searchContactDirectory(input: {
+    channel: MaxEngagementChannelRecord;
+    query: ContactDirectorySearchInput;
+    limit?: number;
+  }): Promise<ContactDirectoryRecord[]>;
 
   listUnprocessedPosts(
     channelId: string,
@@ -776,6 +782,43 @@ export class MaxEngagementRepository implements EngagementRepository {
         times_shared: 1
       });
     if (error) throw error;
+  }
+
+  async searchContactDirectory(input: {
+    channel: MaxEngagementChannelRecord;
+    query: ContactDirectorySearchInput;
+    limit?: number;
+  }): Promise<ContactDirectoryRecord[]> {
+    const terms = buildContactDirectorySearchTerms(input.query);
+    if (terms.length === 0) return [];
+
+    const { data: publicRow, error: publicError } = await this.supabase
+      .from("city_memory_publics")
+      .select("city_id")
+      .eq("channel_id", input.channel.id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (publicError) throw publicError;
+    const cityId = typeof publicRow?.city_id === "string" ? publicRow.city_id : null;
+    if (!cityId) return [];
+
+    const { data, error } = await this.supabase
+      .from("city_contact_directory")
+      .select("id, city_id, channel_id, category, normalized_category, contact_name, phone, normalized_phone, max_contact_id, raw_attachment, source_message_id, source_author_name, source_context, first_seen_at, last_seen_at, times_shared")
+      .eq("city_id", cityId)
+      .order("times_shared", { ascending: false })
+      .order("last_seen_at", { ascending: false })
+      .limit(100);
+    if (error) throw error;
+
+    return (data ?? [])
+      .map((row) => mapContactDirectoryRecord(row as Record<string, unknown>))
+      .map((record) => ({ record, score: scoreContactDirectoryRecord(record, terms) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || compareIsoDesc(left.record.lastSeenAt, right.record.lastSeenAt))
+      .slice(0, Math.max(1, input.limit ?? 3))
+      .map((item) => item.record);
   }
 
   async listUnprocessedSubscriberComments(
@@ -1731,6 +1774,27 @@ function mapChatMessage(
   };
 }
 
+function mapContactDirectoryRecord(row: Record<string, unknown>): ContactDirectoryRecord {
+  return {
+    id: String(row.id),
+    cityId: typeof row.city_id === "string" ? row.city_id : null,
+    channelId: String(row.channel_id),
+    category: String(row.category),
+    normalizedCategory: String(row.normalized_category ?? row.category ?? ""),
+    contactName: typeof row.contact_name === "string" ? row.contact_name : null,
+    phone: typeof row.phone === "string" ? row.phone : null,
+    normalizedPhone: typeof row.normalized_phone === "string" ? row.normalized_phone : null,
+    maxContactId: typeof row.max_contact_id === "string" ? row.max_contact_id : null,
+    rawAttachment: row.raw_attachment,
+    sourceMessageId: String(row.source_message_id),
+    sourceAuthorName: typeof row.source_author_name === "string" ? row.source_author_name : null,
+    sourceContext: typeof row.source_context === "string" ? row.source_context : "",
+    firstSeenAt: typeof row.first_seen_at === "string" ? row.first_seen_at : null,
+    lastSeenAt: typeof row.last_seen_at === "string" ? row.last_seen_at : null,
+    timesShared: numberOrDefault(row.times_shared, 1)
+  };
+}
+
 function mapComment(
   row: CommentRow
 ): MaxEngagementCommentRecord {
@@ -1944,6 +2008,10 @@ function numberOrDefault(
   return Number.isFinite(numeric)
     ? numeric
     : fallback;
+}
+
+function compareIsoDesc(left: string | null, right: string | null): number {
+  return new Date(right ?? 0).getTime() - new Date(left ?? 0).getTime();
 }
 
 function nullToUndefined(

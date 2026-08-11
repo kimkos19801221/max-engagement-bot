@@ -151,6 +151,9 @@ class HttpMaxClient implements MaxClient {
 
   async sendChatMessage(input: MaxSendChatMessageInput): Promise<MaxSendChatMessageResult> {
     const payload: Record<string, unknown> = { text: input.text };
+    if (input.attachments && input.attachments.length > 0) {
+      payload.attachments = input.attachments;
+    }
     if (input.replyToMessageId) {
       payload.link = { type: "reply", mid: input.replyToMessageId };
     }

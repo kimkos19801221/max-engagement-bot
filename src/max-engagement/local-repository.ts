@@ -4,8 +4,8 @@ import { dirname, resolve } from "node:path";
 
 import { createEmptyCityMemoryState, ingestCityMemory, ingestCityMemoryCandidate, normalizeCityMemoryState, searchCityMemory, summarizeCityMemory } from "../city-memory/local-store.js";
 import type { CityMemoryCandidate, CityMemoryIngestResult, CityMemorySearchResult, CityMemoryState } from "../city-memory/types.js";
-import type { ContactDirectoryCandidate } from "./contact-directory.js";
-import { normalizeCategory, normalizePhone } from "./contact-directory.js";
+import type { ContactDirectoryCandidate, ContactDirectoryRecord, ContactDirectorySearchInput } from "./contact-directory.js";
+import { buildContactDirectorySearchTerms, normalizeCategory, normalizePhone, scoreContactDirectoryRecord } from "./contact-directory.js";
 import { extractLinkMetadataText } from "./antispam.js";
 import { classifyPostText } from "./content-safety.js";
 import type { BotActionInput, EngagementRepository } from "./repository.js";
@@ -773,6 +773,24 @@ export class LocalEngagementRepository implements EngagementRepository {
     });
   }
 
+  async searchContactDirectory(input: {
+    channel: MaxEngagementChannelRecord;
+    query: ContactDirectorySearchInput;
+    limit?: number;
+  }): Promise<ContactDirectoryRecord[]> {
+    const data = await this.read();
+    const terms = buildContactDirectorySearchTerms(input.query);
+    if (terms.length === 0) return [];
+    return data.contactDirectory
+      .filter((item) => item.channelId === input.channel.id)
+      .map((item) => mapLocalContactDirectoryRecord(item))
+      .map((record) => ({ record, score: scoreContactDirectoryRecord(record, terms) }))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || new Date(right.record.lastSeenAt ?? 0).getTime() - new Date(left.record.lastSeenAt ?? 0).getTime())
+      .slice(0, Math.max(1, input.limit ?? 3))
+      .map((item) => item.record);
+  }
+
   async searchCityMemory(input: {
     cityName?: string | null;
     channelId?: string | null;
@@ -1306,6 +1324,27 @@ function ingestMessageIntoCityMemory(data: LocalDemoData, input: {
     url: input.url ?? null,
     receivedAt: input.receivedAt ?? null
   });
+}
+
+function mapLocalContactDirectoryRecord(row: LocalContactDirectoryRecord): ContactDirectoryRecord {
+  return {
+    id: row.id,
+    cityId: null,
+    channelId: row.channelId,
+    category: row.category,
+    normalizedCategory: row.normalizedCategory,
+    contactName: row.contactName,
+    phone: row.phone,
+    normalizedPhone: row.normalizedPhone,
+    maxContactId: row.maxContactId,
+    rawAttachment: row.rawAttachment,
+    sourceMessageId: row.sourceMessageId,
+    sourceAuthorName: row.sourceAuthorName,
+    sourceContext: row.sourceContext,
+    firstSeenAt: row.firstSeenAt,
+    lastSeenAt: row.lastSeenAt,
+    timesShared: row.timesShared
+  };
 }
 
 function inferCityName(channel: MaxEngagementChannelRecord): string {

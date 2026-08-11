@@ -27,6 +27,7 @@ export type ChatSendMessageInput = {
   chatId: string;
   text: string;
   replyToMessageId?: string | null;
+  attachments?: unknown[];
 };
 
 export type ChatSendMessageResult = {

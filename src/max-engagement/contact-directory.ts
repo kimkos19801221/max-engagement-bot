@@ -13,6 +13,32 @@ export type ContactDirectoryCandidate = {
   sourceContext: string;
 };
 
+export type ContactDirectoryRecord = {
+  id: string;
+  cityId: string | null;
+  channelId: string;
+  category: string;
+  normalizedCategory: string;
+  contactName: string | null;
+  phone: string | null;
+  normalizedPhone: string | null;
+  maxContactId: string | null;
+  rawAttachment: unknown;
+  sourceMessageId: string;
+  sourceAuthorName: string | null;
+  sourceContext: string;
+  firstSeenAt: string | null;
+  lastSeenAt: string | null;
+  timesShared: number;
+};
+
+export type ContactDirectorySearchInput = {
+  text: string;
+  category?: string | null;
+  subcategory?: string | null;
+  searchTerms?: string[];
+};
+
 type ContactClassification = {
   is_professional_contact: boolean;
   category: string;
@@ -21,6 +47,12 @@ type ContactClassification = {
 };
 
 const DEFAULT_MODEL = "gpt-4.1-mini";
+const CONTACT_REPLY_PREFIX = "\u041d\u0430\u0448\u043b\u0430 \u043a\u043e\u043d\u0442\u0430\u043a\u0442";
+const CONTACT_STOP_WORDS = new Set([
+  "\u043f\u043e", "\u0434\u043b\u044f", "\u0435\u0441\u0442\u044c", "\u043d\u0443\u0436\u0435\u043d", "\u043d\u0443\u0436\u043d\u0430", "\u043d\u0443\u0436\u043d\u043e",
+  "\u043f\u043e\u0441\u043e\u0432\u0435\u0442\u0443\u0439\u0442\u0435", "\u043f\u043e\u0434\u0441\u043a\u0430\u0436\u0438\u0442\u0435", "\u0445\u043e\u0440\u043e\u0448\u0438\u0439",
+  "\u0445\u043e\u0440\u043e\u0448\u0435\u0433\u043e", "\u043c\u0430\u0441\u0442\u0435\u0440", "\u043c\u0430\u0441\u0442\u0435\u0440\u0430", "\u0441\u043f\u0435\u0446\u0438\u0430\u043b\u0438\u0441\u0442"
+]);
 
 export function hasRawAttachments(message: MaxEngagementChatMessageRecord): boolean {
   return Array.isArray(message.rawAttachments) && message.rawAttachments.length > 0;
@@ -147,6 +179,59 @@ export function normalizeCategory(value: string): string {
     .slice(0, 120);
 }
 
+export function buildContactDirectorySearchTerms(input: ContactDirectorySearchInput): string[] {
+  const values = [
+    input.category ?? "",
+    input.subcategory ?? "",
+    ...(input.searchTerms ?? []),
+    input.text
+  ];
+  const terms = new Set<string>();
+  for (const value of values) {
+    const normalized = normalizeContactSearchText(value);
+    if (normalized) terms.add(normalized);
+    for (const token of tokenizeContactQuery(normalized)) {
+      terms.add(token);
+      for (const expanded of expandContactToken(token)) {
+        terms.add(expanded);
+      }
+    }
+  }
+  return [...terms].filter((term) => term.length >= 3).slice(0, 40);
+}
+
+export function scoreContactDirectoryRecord(record: ContactDirectoryRecord, terms: string[]): number {
+  const normalizedTerms = [...new Set(terms.map(normalizeContactSearchText).filter(Boolean))];
+  if (normalizedTerms.length === 0) return 0;
+
+  const category = normalizeContactSearchText(record.normalizedCategory || record.category);
+  const name = normalizeContactSearchText(record.contactName ?? "");
+  const context = normalizeContactSearchText(record.sourceContext ?? "");
+  let score = 0;
+  for (const term of normalizedTerms) {
+    if (category === term) score += 12;
+    else if (category.includes(term) || term.includes(category)) score += 8;
+    if (name.includes(term)) score += 3;
+    if (context.includes(term)) score += 2;
+  }
+  return score + Math.min(record.timesShared, 5);
+}
+
+export function formatContactDirectoryText(records: ContactDirectoryRecord[]): string {
+  return records.slice(0, 3).map((record, index) => {
+    const label = records.length === 1 ? CONTACT_REPLY_PREFIX : `${index + 1}. ${record.category}`;
+    const name = record.contactName?.trim() || record.category;
+    const phone = record.phone?.trim();
+    return phone ? `${label}: ${name}, ${phone}` : `${label}: ${name}`;
+  }).join("\n");
+}
+
+export function buildMaxContactAttachments(records: ContactDirectoryRecord[]): unknown[] {
+  return records.slice(0, 3)
+    .map((record) => normalizeMaxContactAttachment(record.rawAttachment))
+    .filter((attachment): attachment is Record<string, unknown> => attachment !== null);
+}
+
 function extractOutputText(data: {
   output_text?: string;
   output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
@@ -201,6 +286,82 @@ function safeJson(value: unknown): string {
   } catch {
     return "[]";
   }
+}
+
+function normalizeContactSearchText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/\u0451/g, "\u0435")
+    .replace(/[^\p{L}\p{N} -]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+}
+
+function tokenizeContactQuery(value: string): string[] {
+  return value
+    .split(/\s+/u)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3 && !CONTACT_STOP_WORDS.has(token));
+}
+
+function expandContactToken(token: string): string[] {
+  const result: string[] = [];
+  if (/(?:\u043c\u0430\u043d\u0438\u043a\u044e\u0440|\u043d\u043e\u0433\u0442)/u.test(token)) {
+    result.push("\u043c\u0430\u0441\u0442\u0435\u0440 \u043c\u0430\u043d\u0438\u043a\u044e\u0440\u0430", "\u043c\u0430\u043d\u0438\u043a\u044e\u0440", "\u043d\u043e\u0433\u0442\u0438");
+  }
+  if (/\u0441\u0430\u043d\u0442\u0435\u0445/u.test(token)) {
+    result.push("\u0441\u0430\u043d\u0442\u0435\u0445\u043d\u0438\u043a");
+  }
+  if (/\u044d\u043b\u0435\u043a\u0442\u0440/u.test(token)) {
+    result.push("\u044d\u043b\u0435\u043a\u0442\u0440\u0438\u043a");
+  }
+  if (/\u0440\u0435\u043c\u043e\u043d\u0442/u.test(token)) {
+    result.push("\u043c\u0430\u0441\u0442\u0435\u0440 \u043f\u043e \u0440\u0435\u043c\u043e\u043d\u0442\u0443");
+  }
+  if (/\u043d\u044f\u043d/u.test(token)) {
+    result.push("\u043d\u044f\u043d\u044f");
+  }
+  if (/\u0440\u0435\u043f\u0435\u0442/u.test(token)) {
+    result.push("\u0440\u0435\u043f\u0435\u0442\u0438\u0442\u043e\u0440");
+  }
+  if (/\u043f\u0430\u0440\u0438\u043a|\u0441\u0442\u0440\u0438\u0436|\u0432\u043e\u043b\u043e\u0441/u.test(token)) {
+    result.push("\u043f\u0430\u0440\u0438\u043a\u043c\u0430\u0445\u0435\u0440");
+  }
+  if (/\u0432\u0438\u0437\u0430\u0436|\u043c\u0430\u043a\u0438\u044f\u0436/u.test(token)) {
+    result.push("\u0432\u0438\u0437\u0430\u0436\u0438\u0441\u0442");
+  }
+  if (/\u043c\u0430\u0441\u0441\u0430\u0436/u.test(token)) {
+    result.push("\u043c\u0430\u0441\u0441\u0430\u0436\u0438\u0441\u0442");
+  }
+  if (/\u043b\u043e\u0433\u043e\u043f\u0435\u0434/u.test(token)) {
+    result.push("\u043b\u043e\u0433\u043e\u043f\u0435\u0434");
+  }
+  if (/\u043f\u0441\u0438\u0445\u043e\u043b/u.test(token)) {
+    result.push("\u043f\u0441\u0438\u0445\u043e\u043b\u043e\u0433");
+  }
+  if (/\u0443\u0431\u043e\u0440|\u043a\u043b\u0438\u043d\u0438\u043d/u.test(token)) {
+    result.push("\u043a\u043b\u0438\u043d\u0438\u043d\u0433");
+  }
+  return result;
+}
+
+function normalizeMaxContactAttachment(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (row.type !== "contact") return null;
+  const payload = row.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const payloadRow = payload as Record<string, unknown>;
+  if (typeof payloadRow.vcf_info !== "string" || !payloadRow.vcf_info.trim()) return null;
+  const cleanPayload: Record<string, unknown> = { vcf_info: payloadRow.vcf_info };
+  if (payloadRow.max_info && typeof payloadRow.max_info === "object" && !Array.isArray(payloadRow.max_info)) {
+    cleanPayload.max_info = payloadRow.max_info;
+  }
+  if (typeof payloadRow.hash === "string" && payloadRow.hash.trim()) {
+    cleanPayload.hash = payloadRow.hash;
+  }
+  return { type: "contact", payload: cleanPayload };
 }
 
 function stableStringify(value: unknown): string {

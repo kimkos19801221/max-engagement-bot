@@ -3,9 +3,14 @@ import { config as loadDotenv } from "dotenv";
 
 import { hasStopTrigger, looksLikeQuestion } from "./max-engagement/content-safety.js";
 import { generateDryRunDraft, generatePostInitiativeDraft } from "./max-engagement/draft-generator.js";
-import { analyzeCityMessage, buildFallbackCityReply, generateCityReply } from "./max-engagement/city-assistant.js";
+import { analyzeCityMessage, buildFallbackCityReply, generateCityReply, type CityAssistantPlan } from "./max-engagement/city-assistant.js";
 import { moderateChatMessage } from "./max-engagement/antispam.js";
-import { classifyProfessionalContactAttachment, hasRawAttachments } from "./max-engagement/contact-directory.js";
+import {
+  buildMaxContactAttachments,
+  classifyProfessionalContactAttachment,
+  formatContactDirectoryText,
+  hasRawAttachments
+} from "./max-engagement/contact-directory.js";
 import { createMaxClientFromEnv } from "./max-engagement/max-client.js";
 import { MaxEngagementRepository, createSupabaseClientFromEnv, type EngagementRepository } from "./max-engagement/repository.js";
 import { decideEngagementAction } from "./max-engagement/safety.js";
@@ -294,6 +299,17 @@ async function processChatMessage(
     return "skipped";
   }
 
+  const contactReply = await tryPublishContactDirectoryReply({
+    repository,
+    maxClient,
+    channel,
+    message,
+    plan
+  });
+  if (contactReply) {
+    return contactReply;
+  }
+
   if (plan.shouldSaveMemory && plan.memoryCandidate) {
     try {
       await repository.ingestCityMemoryCandidate({
@@ -388,6 +404,108 @@ async function createAndMaybePublishChatReply(input: {
   if (status === "posted") return "posted";
   if (status === "failed") return "failed";
   return "drafted";
+}
+
+async function tryPublishContactDirectoryReply(input: {
+  repository: EngagementRepository;
+  maxClient: ChatClient;
+  channel: MaxEngagementChannelRecord;
+  message: MaxEngagementChatMessageRecord;
+  plan: CityAssistantPlan;
+}): Promise<ProcessedResult | null> {
+  const { repository, maxClient, channel, message, plan } = input;
+  if (!plan.shouldReply || plan.requestScope === "global" || plan.alreadyAnsweredByParticipants) {
+    return null;
+  }
+  if (!contactQueryLooksUseful(plan, message)) {
+    return null;
+  }
+
+  const contacts = await repository.searchContactDirectory({
+    channel,
+    query: {
+      text: message.text,
+      category: plan.category,
+      subcategory: plan.subcategory,
+      searchTerms: plan.searchTerms
+    },
+    limit: 3
+  });
+  if (contacts.length === 0) return null;
+
+  const text = formatContactDirectoryText(contacts).slice(0, 1800);
+  const attachments = buildMaxContactAttachments(contacts);
+  let status: "draft" | "posted" | "failed" = channel.dryRun ? "draft" : "posted";
+  let postedMaxCommentId: string | null = null;
+  let errorMessage: string | null = null;
+  let usedFallback = false;
+
+  if (!channel.dryRun) {
+    try {
+      const published = await maxClient.sendChatMessage({
+        chatId: channel.maxChannelId,
+        text,
+        replyToMessageId: message.maxMessageId,
+        attachments
+      });
+      postedMaxCommentId = published.messageId;
+    } catch (error) {
+      if (attachments.length === 0) {
+        status = "failed";
+        errorMessage = error instanceof Error ? error.message : String(error);
+      } else {
+        usedFallback = true;
+        try {
+          const published = await maxClient.sendChatMessage({
+            chatId: channel.maxChannelId,
+            text,
+            replyToMessageId: message.maxMessageId
+          });
+          postedMaxCommentId = published.messageId;
+          errorMessage = `Contact-card attachment fallback used: ${error instanceof Error ? error.message : String(error)}`;
+        } catch (fallbackError) {
+          status = "failed";
+          errorMessage = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+        }
+      }
+    }
+  }
+
+  await repository.createBotAction({
+    channelId: channel.id,
+    postId: null,
+    chatMessageId: message.id,
+    threadId: null,
+    triggerCommentId: null,
+    actionType: "reply",
+    status,
+    requestedTeasingLevel: 0,
+    finalTeasingLevel: 0,
+    safetyReason: usedFallback
+      ? `Contact directory match: ${contacts.length}; text fallback used`
+      : `Contact directory match: ${contacts.length}`,
+    generatedText: text,
+    requiresHumanReview: channel.dryRun,
+    postedMaxCommentId,
+    errorMessage
+  });
+  await repository.markChatMessageProcessed(message.id);
+  if (status === "posted") return "posted";
+  if (status === "failed") return "failed";
+  return "drafted";
+}
+
+function contactQueryLooksUseful(plan: CityAssistantPlan, message: MaxEngagementChatMessageRecord): boolean {
+  const text = [
+    message.text,
+    plan.category,
+    plan.subcategory,
+    ...plan.searchTerms
+  ].join(" ").toLowerCase();
+  return (
+    /\b(contact|service|master|specialist)\b/i.test(text) ||
+    /(контакт|телефон|номер|мастер|специалист|посовет|порекоменду|нужен|нужна|маникюр|ногт|сантехник|электрик|ремонт|нян|репетитор|парикмахер|визаж|массаж|логопед|психолог|уборк|клининг)/iu.test(text)
+  );
 }
 
 async function processPostSafely(
