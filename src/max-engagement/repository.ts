@@ -15,6 +15,7 @@ import type {
   MaxUpdate,
   TeasingLevel
 } from "./types.js";
+import type { ChatPlatform, UnifiedChatMessage } from "../chat-transport/types.js";
 import { extractLinkMetadataText } from "./antispam.js";
 import { classifyPostText } from "./content-safety.js";
 import type { CityMemoryCandidate, CityMemoryIngestResult, CityMemorySearchResult } from "../city-memory/types.js";
@@ -52,6 +53,10 @@ export type EngagementRepository = {
   importMaxUpdates(
     updates: MaxUpdate[]
   ): Promise<MaxUpdatesImportResult>;
+
+  importChatMessages(
+    messages: UnifiedChatMessage[]
+  ): Promise<ChatMessagesImportResult>;
 
   listRunnableChannels(
     limit?: number
@@ -143,6 +148,14 @@ export type EngagementRepository = {
 };
 
 export type MaxUpdatesImportResult = {
+  received: number;
+  imported: number;
+  channels: number;
+  messages: number;
+  skipped: number;
+};
+
+export type ChatMessagesImportResult = {
   received: number;
   imported: number;
   channels: number;
@@ -287,6 +300,34 @@ export class MaxEngagementRepository implements EngagementRepository {
         }
       }
 
+      result.imported += 1;
+    }
+
+    return result;
+  }
+
+  async importChatMessages(
+    messages: UnifiedChatMessage[]
+  ): Promise<ChatMessagesImportResult> {
+    const result: ChatMessagesImportResult = {
+      received: messages.length,
+      imported: 0,
+      channels: 0,
+      messages: 0,
+      skipped: 0
+    };
+
+    for (const message of messages) {
+      const channel = await this.upsertChannelFromUnifiedChatMessage(message);
+      if (channel.created) result.channels += 1;
+      if (!channel.record) {
+        result.skipped += 1;
+        continue;
+      }
+
+      const imported = await this.importUnifiedChatMessage(channel.record, message);
+      if (imported) result.messages += 1;
+      else result.skipped += 1;
       result.imported += 1;
     }
 
@@ -1120,6 +1161,99 @@ export class MaxEngagementRepository implements EngagementRepository {
     return mapComment(data as CommentRow);
   }
 
+  private async upsertChannelFromUnifiedChatMessage(
+    message: UnifiedChatMessage
+  ): Promise<{ record: MaxEngagementChannelRecord | null; created: boolean }> {
+    const externalChatId = message.externalChatId.trim();
+    if (!externalChatId) return { record: null, created: false };
+
+    const { data: existing, error: existingError } = await this.supabase
+      .from("max_engagement_channels")
+      .select("*")
+      .eq("platform", message.platform)
+      .eq("max_channel_id", externalChatId)
+      .maybeSingle();
+    if (existingError) throw existingError;
+
+    if (existing) {
+      const mapped = mapChannel(existing as ChannelRow);
+      const patch: Record<string, unknown> = {};
+      if ((mapped.communityType ?? "channel") !== "chat") patch.community_type = "chat";
+      if (!mapped.enabled) patch.enabled = true;
+      if (mapped.mode === "off") patch.mode = "suitable_messages";
+      if (mapped.dryRun) patch.dry_run = false;
+      if (message.chatTitle?.trim() && mapped.title !== message.chatTitle.trim()) patch.title = message.chatTitle.trim();
+
+      if (Object.keys(patch).length > 0) {
+        const { data: updated, error: updateError } = await this.supabase
+          .from("max_engagement_channels")
+          .update(patch)
+          .eq("id", mapped.id)
+          .select("*")
+          .single();
+        if (updateError) throw updateError;
+        return { record: mapChannel(updated as ChannelRow), created: false };
+      }
+      return { record: mapped, created: false };
+    }
+
+    const platformLabel = message.platform === "telegram" ? "Telegram" : "MAX";
+    const row = {
+      platform: message.platform,
+      max_channel_id: externalChatId,
+      title: message.chatTitle?.trim() || `${platformLabel} чат ${externalChatId}`,
+      community_type: "chat",
+      channel_kind: "moms",
+      enabled: true,
+      mode: "suitable_messages",
+      antispam_enabled: false,
+      antispam_delete_links: true,
+      teasing_level: 1,
+      politics_teasing_level: 0,
+      bot_name: "Алина",
+      bot_signature: "- Алина",
+      dry_run: false
+    };
+
+    const { data, error } = await this.supabase
+      .from("max_engagement_channels")
+      .insert(row)
+      .select("*")
+      .single();
+    if (error) throw error;
+    return { record: mapChannel(data as ChannelRow), created: true };
+  }
+
+  private async importUnifiedChatMessage(
+    channel: MaxEngagementChannelRecord,
+    message: UnifiedChatMessage
+  ): Promise<boolean> {
+    const text = message.text.trim();
+    if (!message.externalMessageId || (!text && message.attachments.length === 0)) return false;
+
+    const row = {
+      channel_id: channel.id,
+      max_message_id: message.externalMessageId,
+      author_user_id: message.authorId,
+      author_name: message.authorName,
+      author_is_bot: message.authorIsBot,
+      text,
+      attachments: message.attachments.map((attachment) => ({
+        kind: attachment.kind,
+        raw: attachment.raw
+      })),
+      posted_at: message.postedAt,
+      linked_text: [message.linkedText, message.metadataText].filter((value): value is string => Boolean(value)).join("\n") || null,
+      reply_to_max_message_id: message.replyToMessageId
+    };
+
+    const { error } = await this.supabase
+      .from("max_engagement_chat_messages")
+      .upsert(row, { onConflict: "channel_id,max_message_id", ignoreDuplicates: true });
+    if (error) throw error;
+    return true;
+  }
+
   private async upsertChannelFromUpdate(
     update: MaxUpdate
   ): Promise<{
@@ -1151,6 +1285,7 @@ export class MaxEngagementRepository implements EngagementRepository {
       await this.supabase
         .from("max_engagement_channels")
         .select("*")
+        .eq("platform", "max")
         .eq("max_channel_id", maxChannelId)
         .maybeSingle();
 
@@ -1210,6 +1345,7 @@ export class MaxEngagementRepository implements EngagementRepository {
      * такого столбца в текущей базе может ещё не быть.
      */
     const row = {
+      platform: "max",
       max_channel_id: maxChannelId,
       title:
         isChat
@@ -1496,6 +1632,7 @@ function mapChannel(
 ): MaxEngagementChannelRecord {
   return {
     id: String(row.id),
+    platform: row.platform === "telegram" ? "telegram" : "max",
     maxChannelId: String(row.max_channel_id),
     title: String(row.title),
     channelKind:

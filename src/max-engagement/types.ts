@@ -1,3 +1,6 @@
+import type { ChatClient, ChatPlatform, ChatSendMessageInput, ChatSendMessageResult, ChatAdmin, ChatDeleteMessageInput } from "../chat-transport/types.js";
+export type { ChatClient, ChatPlatform, ChatAttachment, UnifiedChatMessage } from "../chat-transport/types.js";
+
 export type MaxEngagementChannelKind = "moms" | "news";
 
 export type MaxCommunityType = "channel" | "chat";
@@ -83,6 +86,8 @@ export type MaxEngagementChannelSettings = {
 export type MaxEngagementChannelRecord =
   MaxEngagementChannelSettings & {
     id: string;
+    /** Transport platform. Legacy rows without the field are treated as MAX. */
+    platform?: ChatPlatform;
     maxChannelId: string;
     title: string;
     dryRun: boolean;
@@ -221,30 +226,15 @@ export type MaxPublishCommentResult = {
 /*
  * Отправка нового сообщения или ответа в обычный групповой чат.
  */
-export type MaxSendChatMessageInput = {
-  chatId: string;
-  text: string;
-  replyToMessageId?: string | null;
-};
+export type MaxSendChatMessageInput = ChatSendMessageInput;
 
-export type MaxSendChatMessageResult = {
-  messageId: string;
-};
+export type MaxSendChatMessageResult = ChatSendMessageResult;
 
-export type MaxChatAdmin = {
-  userId: string | null;
-  isAdmin: boolean;
-  isOwner: boolean;
-  isBot: boolean;
-  permissions: string[];
-};
+export type MaxChatAdmin = ChatAdmin;
 
-export type MaxDeleteMessageInput = {
-  chatId: string;
-  messageId: string;
-};
+export type MaxDeleteMessageInput = ChatDeleteMessageInput;
 
-export type MaxClient = {
+export type MaxClient = ChatClient & {
   fetchPosts(
     channel: MaxEngagementChannelRecord
   ): Promise<MaxApiPost[]>;
@@ -263,17 +253,6 @@ export type MaxClient = {
     commentId: string
   ): Promise<void>;
 
-  deleteChatMessage(
-    input: MaxDeleteMessageInput
-  ): Promise<void>;
-
-  listChatAdmins(
-    chatId: string
-  ): Promise<MaxChatAdmin[]>;
-
-  sendChatMessage(
-    input: MaxSendChatMessageInput
-  ): Promise<MaxSendChatMessageResult>;
 };
 
 export type MaxUpdateType =

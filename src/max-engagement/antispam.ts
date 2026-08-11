@@ -1,8 +1,8 @@
 import type {
-  MaxClient,
   MaxEngagementChannelRecord,
   MaxEngagementChatMessageRecord
 } from "./types.js";
+import type { ChatClient } from "../chat-transport/types.js";
 
 export type AntispamDecisionReason =
   | "allow"
@@ -31,7 +31,7 @@ const DELETE_INTERVAL_MS = 550;
 export async function moderateChatMessage(input: {
   channel: MaxEngagementChannelRecord;
   message: MaxEngagementChatMessageRecord;
-  maxClient: MaxClient;
+  maxClient: ChatClient;
   logger?: Logger;
 }): Promise<AntispamDecision> {
   const logger = input.logger ?? console;

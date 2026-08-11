@@ -20,6 +20,7 @@ import type {
   TeasingLevel
 } from "./max-engagement/types.js";
 
+import type { ChatClient, ChatPlatform } from "./chat-transport/types.js";
 loadDotenv({ path: ".env.local", override: false });
 
 type WorkerResult = {
@@ -42,7 +43,9 @@ export async function runDryRunWorker(
   repository: EngagementRepository = new MaxEngagementRepository(createSupabaseClientFromEnv()),
   maxClient: MaxClient = createMaxClientFromEnv()
 ): Promise<WorkerResult> {
-  const channels = await repository.listRunnableChannels();
+  const channels = (await repository.listRunnableChannels()).filter(
+    (channel) => (channel.platform ?? "max") === "max"
+  );
   const result: WorkerResult = {
     channels: channels.length,
     posts: 0,
@@ -91,9 +94,32 @@ export async function runDryRunWorker(
   return result;
 }
 
+export async function runChatWorker(
+  repository: EngagementRepository,
+  chatClient: ChatClient,
+  platform: ChatPlatform
+): Promise<WorkerResult> {
+  const channels = (await repository.listRunnableChannels()).filter((channel) =>
+    (channel.platform ?? "max") === platform && (channel.communityType ?? "channel") === "chat"
+  );
+  const result: WorkerResult = {
+    channels: channels.length, posts: 0, comments: 0, chatMessages: 0, actions: 0, posted: 0, skipped: 0, failed: 0
+  };
+
+  for (const channel of channels) {
+    const messages = await repository.listUnprocessedChatMessages(channel.id);
+    result.chatMessages += messages.length;
+    for (const message of messages) {
+      applyProcessedResult(result, await processChatMessageSafely(repository, chatClient, channel, message));
+    }
+  }
+
+  return result;
+}
+
 async function processChatMessageSafely(
   repository: EngagementRepository,
-  maxClient: MaxClient,
+  maxClient: ChatClient,
   channel: MaxEngagementChannelRecord,
   message: MaxEngagementChatMessageRecord
 ): Promise<ProcessedResult> {
@@ -120,7 +146,7 @@ async function processChatMessageSafely(
 
 async function processChatMessage(
   repository: EngagementRepository,
-  maxClient: MaxClient,
+  maxClient: ChatClient,
   channel: MaxEngagementChannelRecord,
   message: MaxEngagementChatMessageRecord
 ): Promise<ProcessedResult> {
@@ -316,7 +342,7 @@ async function processChatMessage(
 
 async function createAndMaybePublishChatReply(input: {
   repository: EngagementRepository;
-  maxClient: MaxClient;
+  maxClient: ChatClient;
   channel: MaxEngagementChannelRecord;
   message: MaxEngagementChatMessageRecord;
   draft: { shouldReply: boolean; text: string; safetyReason: string };

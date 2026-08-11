@@ -9,6 +9,7 @@ import { normalizeCategory, normalizePhone } from "./contact-directory.js";
 import { extractLinkMetadataText } from "./antispam.js";
 import { classifyPostText } from "./content-safety.js";
 import type { BotActionInput, EngagementRepository } from "./repository.js";
+import type { UnifiedChatMessage } from "../chat-transport/types.js";
 import { getMaxUpdateUserName, isMaxChatMessageUpdate } from "./types.js";
 import type {
   MaxApiComment,
@@ -564,6 +565,80 @@ export class LocalEngagementRepository implements EngagementRepository {
     return result;
   }
 
+  async importChatMessages(messages: UnifiedChatMessage[]): Promise<{
+    received: number; imported: number; channels: number; messages: number; skipped: number;
+  }> {
+    const result = { received: messages.length, imported: 0, channels: 0, messages: 0, skipped: 0 };
+
+    await this.update((data) => {
+      for (const message of messages) {
+        const existingChannel = data.channels.find((channel) =>
+          (channel.platform ?? "max") === message.platform && channel.maxChannelId === message.externalChatId
+        );
+        let channel = existingChannel;
+        if (!channel) {
+          channel = createChannel({
+            id: randomUUID(),
+            platform: message.platform,
+            maxChannelId: message.externalChatId,
+            title: message.chatTitle?.trim() || `${message.platform === "telegram" ? "Telegram" : "MAX"} чат ${message.externalChatId}`,
+            channelKind: "moms",
+            mode: "suitable_messages",
+            communityType: "chat",
+            teasingLevel: 1,
+            politicsTeasingLevel: 0,
+            dryRun: false,
+            botName: "Алина",
+            botSignature: "- Алина"
+          });
+          data.channels.push(channel);
+          result.channels += 1;
+        } else {
+          channel.platform = message.platform;
+          channel.communityType = "chat";
+          channel.enabled = true;
+          if (channel.mode === "off") channel.mode = "suitable_messages";
+          channel.dryRun = false;
+          if (message.chatTitle?.trim()) channel.title = message.chatTitle.trim();
+        }
+
+        const existing = data.chatMessages.find((item) =>
+          item.channelId === channel!.id && item.maxMessageId === message.externalMessageId
+        );
+        if (existing) {
+          result.skipped += 1;
+          result.imported += 1;
+          continue;
+        }
+        if (!message.text.trim() && message.attachments.length === 0) {
+          result.skipped += 1;
+          result.imported += 1;
+          continue;
+        }
+
+        data.chatMessages.push({
+          id: randomUUID(),
+          channelId: channel.id,
+          maxMessageId: message.externalMessageId,
+          authorUserId: message.authorId,
+          authorName: message.authorName,
+          authorIsBot: message.authorIsBot,
+          text: message.text.trim(),
+          rawAttachments: message.attachments.map((attachment) => ({ kind: attachment.kind, raw: attachment.raw })),
+          postedAt: message.postedAt,
+          replyToMaxMessageId: message.replyToMessageId,
+          linkedText: message.linkedText ?? null,
+          metadataText: message.metadataText ?? null,
+          processedAt: null
+        });
+        result.messages += 1;
+        result.imported += 1;
+      }
+    });
+
+    return result;
+  }
+
   async analyticsSummary() {
     const data = await this.read();
     const botTeases = data.actions.filter((action) => action.finalTeasingLevel > 0).length;
@@ -876,7 +951,7 @@ function upsertChannelFromUpdate(data: LocalDemoData, update: MaxUpdate): {
     : update.is_channel === true || update.message?.recipient?.chat_type === "channel"
       ? "channel"
       : undefined;
-  const existing = data.channels.find((channel) => channel.maxChannelId === maxChannelId);
+  const existing = data.channels.find((channel) => (channel.platform ?? "max") === "max" && channel.maxChannelId === maxChannelId);
   if (existing) {
     if (communityType) existing.communityType = communityType;
     if (communityType === "chat") {
@@ -893,6 +968,7 @@ function upsertChannelFromUpdate(data: LocalDemoData, update: MaxUpdate): {
 
   const channel = createChannel({
     id: randomUUID(),
+    platform: "max",
     maxChannelId,
     title: communityType === "channel" ? `MAX канал ${maxChannelId}` : `MAX чат ${maxChannelId}`,
     channelKind: communityType === "chat" ? "moms" : "news",
@@ -1113,6 +1189,7 @@ function upsertLocalComment(data: LocalDemoData, channelId: string, postId: stri
 
 function createChannel(input: {
   id: string;
+  platform?: "max" | "telegram";
   maxChannelId: string;
   title: string;
   channelKind: "moms" | "news";

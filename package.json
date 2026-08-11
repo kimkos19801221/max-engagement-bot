@@ -24,7 +24,10 @@
     "sync:max": "tsx src/sync-max.ts",
     "timeweb": "tsx src/timeweb-runtime.ts",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "telegram:poll": "tsx src/telegram-worker.ts",
+    "telegram:watch": "tsx src/telegram-worker.ts --loop",
+    "telegram:timeweb": "tsx src/telegram-timeweb-runtime.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
