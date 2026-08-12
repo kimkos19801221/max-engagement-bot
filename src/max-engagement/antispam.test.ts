@@ -112,24 +112,48 @@ describe("MAX chat antispam", () => {
     expect(client.deleted).toHaveLength(0);
   });
 
-  it("can be disabled per chat independently", async () => {
+  it("forces MAX chat antispam even when stored flag is false", async () => {
     const client = new FakeMaxClient();
-    const enabled = await moderateChatMessage({
-      channel: createChannel({ id: "enabled", maxChannelId: "-1", antispamEnabled: true }),
-      message: createMessage({ channelId: "enabled", text: "https://example.com" }),
-      maxClient: client,
-      logger: silentLogger()
-    });
-    const disabled = await moderateChatMessage({
-      channel: createChannel({ id: "disabled", maxChannelId: "-2", antispamEnabled: false }),
-      message: createMessage({ channelId: "disabled", text: "https://example.com" }),
+    const decision = await moderateChatMessage({
+      channel: createChannel({ id: "forced", maxChannelId: "-1", antispamEnabled: false }),
+      message: createMessage({ channelId: "forced", text: "https://example.com" }),
       maxClient: client,
       logger: silentLogger()
     });
 
-    expect(enabled.shouldStopPipeline).toBe(true);
-    expect(disabled.reason).toBe("antispam_disabled");
-    expect(disabled.shouldStopPipeline).toBe(false);
+    expect(decision.shouldStopPipeline).toBe(true);
+    expect(decision.deleteSucceeded).toBe(true);
+    expect(client.deleted).toEqual([{ chatId: "-1", messageId: "mid-1" }]);
+  });
+
+  it("does not force antispam for Telegram channels", async () => {
+    const client = new FakeMaxClient();
+    const decision = await moderateChatMessage({
+      channel: createChannel({ id: "telegram", platform: "telegram", maxChannelId: "-2", antispamEnabled: false }),
+      message: createMessage({ channelId: "telegram", text: "https://example.com" }),
+      maxClient: client,
+      logger: silentLogger()
+    });
+
+    expect(decision.reason).toBe("antispam_disabled");
+    expect(decision.shouldStopPipeline).toBe(false);
+    expect(client.deleted).toHaveLength(0);
+  });
+
+  it("blocks links nested in raw attachment metadata", async () => {
+    const client = new FakeMaxClient();
+    const decision = await moderateChatMessage({
+      channel: createChannel({ antispamEnabled: true }),
+      message: createMessage({
+        text: "look",
+        rawAttachments: [{ preview: { url: "https://example.com/from-preview" } }]
+      }),
+      maxClient: client,
+      logger: silentLogger()
+    });
+
+    expect(decision.shouldStopPipeline).toBe(true);
+    expect(decision.deleteSucceeded).toBe(true);
     expect(client.deleted).toEqual([{ chatId: "-1", messageId: "mid-1" }]);
   });
 

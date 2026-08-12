@@ -1221,10 +1221,13 @@ export class MaxEngagementRepository implements EngagementRepository {
     if (existing) {
       const mapped = mapChannel(existing as ChannelRow);
       const patch: Record<string, unknown> = {};
+      const isMaxChat = message.platform === "max";
       if ((mapped.communityType ?? "channel") !== "chat") patch.community_type = "chat";
       if (!mapped.enabled) patch.enabled = true;
       if (mapped.mode === "off") patch.mode = "suitable_messages";
       if (mapped.dryRun) patch.dry_run = false;
+      if (isMaxChat && (existing as ChannelRow).antispam_enabled !== true) patch.antispam_enabled = true;
+      if (isMaxChat && (existing as ChannelRow).antispam_delete_links !== true) patch.antispam_delete_links = true;
       if (message.chatTitle?.trim() && mapped.title !== message.chatTitle.trim()) patch.title = message.chatTitle.trim();
 
       if (Object.keys(patch).length > 0) {
@@ -1249,7 +1252,7 @@ export class MaxEngagementRepository implements EngagementRepository {
       channel_kind: "moms",
       enabled: true,
       mode: "suitable_messages",
-      antispam_enabled: false,
+      antispam_enabled: message.platform === "max",
       antispam_delete_links: true,
       teasing_level: 1,
       politics_teasing_level: 0,
@@ -1338,11 +1341,16 @@ export class MaxEngagementRepository implements EngagementRepository {
 
     if (existing) {
       const mapped = mapChannel(existing as ChannelRow);
+      const needsMaxChatAntispam =
+        communityType === "chat" &&
+        ((existing as ChannelRow).antispam_enabled !== true ||
+          (existing as ChannelRow).antispam_delete_links !== true);
       if (communityType === "chat" && (
         mapped.communityType !== "chat" ||
         !mapped.enabled ||
         mapped.mode === "off" ||
-        mapped.dryRun
+        mapped.dryRun ||
+        needsMaxChatAntispam
       )) {
         const patch = {
           community_type: "chat",
@@ -1352,6 +1360,8 @@ export class MaxEngagementRepository implements EngagementRepository {
           channel_kind: "moms",
           enabled: true,
           mode: "suitable_messages",
+          antispam_enabled: true,
+          antispam_delete_links: true,
           dry_run: false
         };
 
@@ -1397,7 +1407,7 @@ export class MaxEngagementRepository implements EngagementRepository {
       channel_kind: isChat ? "moms" : "news",
       enabled: isChat,
       mode: isChat ? "suitable_messages" : "off",
-      antispam_enabled: false,
+      antispam_enabled: isChat,
       antispam_delete_links: true,
       teasing_level: 1,
       politics_teasing_level: 0,
@@ -1673,22 +1683,29 @@ export class MaxEngagementRepository implements EngagementRepository {
 function mapChannel(
   row: ChannelRow
 ): MaxEngagementChannelRecord {
+  const platform = row.platform === "telegram" ? "telegram" : "max";
+  const communityType = inferCommunityType(row);
+  const isMaxChat = platform === "max" && communityType === "chat";
+
   return {
     id: String(row.id),
-    platform: row.platform === "telegram" ? "telegram" : "max",
+    platform,
     maxChannelId: String(row.max_channel_id),
     title: String(row.title),
     channelKind:
       row.channel_kind as MaxEngagementChannelRecord["channelKind"],
-    communityType:
-      inferCommunityType(row),
+    communityType,
     enabled: Boolean(row.enabled),
     antispamEnabled:
-      row.antispam_enabled === undefined
+      isMaxChat
+        ? true
+        : row.antispam_enabled === undefined
         ? envEnablesAntispam(String(row.max_channel_id))
         : Boolean(row.antispam_enabled) || envEnablesAntispam(String(row.max_channel_id)),
     antispamDeleteLinks:
-      row.antispam_delete_links === undefined
+      isMaxChat
+        ? true
+        : row.antispam_delete_links === undefined
         ? envEnablesAntispamDeleteLinks(String(row.max_channel_id))
         : Boolean(row.antispam_delete_links),
     mode:

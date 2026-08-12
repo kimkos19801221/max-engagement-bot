@@ -38,7 +38,11 @@ export async function moderateChatMessage(input: {
   const { channel, message, maxClient } = input;
 
   try {
-    if ((channel.communityType ?? "channel") !== "chat" || !channel.antispamEnabled || !channel.antispamDeleteLinks) {
+    const isMaxChat = (channel.platform ?? "max") === "max" && (channel.communityType ?? "channel") === "chat";
+    const antispamEnabled = isMaxChat || channel.antispamEnabled;
+    const deleteLinksEnabled = isMaxChat || channel.antispamDeleteLinks;
+
+    if ((channel.communityType ?? "channel") !== "chat" || !antispamEnabled || !deleteLinksEnabled) {
       logAntispam(logger, "antispam_disabled", channel, message);
       return allow("antispam_disabled");
     }
@@ -108,8 +112,8 @@ export function containsForbiddenLink(text: string): boolean {
   const patterns = [
     /\bhttps?:\/\/[^\s<>()]+/iu,
     /\bwww\.[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+(?:\/[^\s<>()]*)?/iu,
-    /\b(?:max\.ru|t\.me|telegram\.me|wa\.me|chat\.whatsapp\.com|vk\.com|m\.vk\.com)(?:\/[^\s<>()]*)?/iu,
-    /\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:ru|com|net|org|рф|su|io|me|app|info|biz|online|site|shop|club|pro|dev|ai)(?:\/[^\s<>()]*)?/iu
+    /\b(?:max\.ru|t\.me|telegram\.me|telegram\.org|telegram\.dog|wa\.me|whatsapp\.com|api\.whatsapp\.com|chat\.whatsapp\.com|vk\.com|m\.vk\.com|vk\.cc|bit\.ly|clck\.ru|ok\.ru)(?:\/[^\s<>()]*)?/iu,
+    /\b[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.(?:ru|com|net|org|\u0440\u0444|su|io|me|app|info|biz|online|site|shop|club|pro|dev|ai|ly)(?:\/[^\s<>()]*)?/iu
   ];
 
   return patterns.some((pattern) => pattern.test(normalized));
@@ -124,7 +128,12 @@ export function extractLinkMetadataText(value: unknown): string | null {
 }
 
 function getModerationText(message: MaxEngagementChatMessageRecord): string {
-  return [message.text, message.linkedText, message.metadataText].filter(Boolean).join("\n");
+  return [
+    message.text,
+    message.linkedText,
+    message.metadataText,
+    extractLinkMetadataText(message.rawAttachments)
+  ].filter(Boolean).join("\n");
 }
 
 function collectLinkMetadataText(
