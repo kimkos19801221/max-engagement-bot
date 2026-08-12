@@ -11,6 +11,7 @@ import {
   formatContactDirectoryText,
   hasRawAttachments
 } from "./max-engagement/contact-directory.js";
+import { extractCityMemoryCandidatesFromMessage } from "./max-engagement/city-memory-extractor.js";
 import { createMaxClientFromEnv } from "./max-engagement/max-client.js";
 import { MaxEngagementRepository, createSupabaseClientFromEnv, type EngagementRepository } from "./max-engagement/repository.js";
 import { decideEngagementAction } from "./max-engagement/safety.js";
@@ -297,6 +298,27 @@ async function processChatMessage(
     });
     await repository.markChatMessageProcessed(message.id);
     return "skipped";
+  }
+
+  try {
+    const extractedMemory = await extractCityMemoryCandidatesFromMessage({
+      channel,
+      message,
+      recentMessages,
+      replyToMessage
+    });
+    for (const candidate of extractedMemory) {
+      await repository.ingestCityMemoryCandidate({
+        channel,
+        sourceId: message.maxMessageId || message.id,
+        authorName: message.authorName,
+        text: message.text,
+        receivedAt: message.postedAt,
+        candidate
+      });
+    }
+  } catch (error) {
+    console.error(`City memory extraction skipped for ${message.id}: ${formatWorkerError(error)}`);
   }
 
   const contactReply = await tryPublishContactDirectoryReply({
