@@ -214,6 +214,11 @@ export function scoreContactDirectoryRecord(record: ContactDirectoryRecord, term
     if (name.includes(term)) score += 3;
     if (context.includes(term)) score += 2;
   }
+
+  // Популярность контакта — только бонус между уже релевантными кандидатами.
+  // Если нет ни одного тематического совпадения, контакт не показываем.
+  if (score === 0) return 0;
+
   return score + Math.min(record.timesShared, 5);
 }
 
