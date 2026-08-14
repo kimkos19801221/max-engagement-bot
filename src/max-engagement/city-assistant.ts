@@ -207,7 +207,8 @@ export async function analyzeCityMessage(input: {
     ].join("\n\n")
   });
 
-  return parsePlan(raw);
+  const plan = parsePlan(raw);
+  return applyDeterministicLocalLookupOverride(plan, input.message.text);
 }
 
 export async function generateCityReply(input: {
@@ -277,6 +278,18 @@ export async function generateCityReply(input: {
     };
   }
 
+  // Independent server-side protection against fabricated attribution to unnamed
+  // local sources (for example, "как упоминал один из резидентов"). This applies
+  // regardless of request_scope, including global answers.
+  if (containsUnsupportedResidentAttribution(parsed.reply, parsed.usedFactIds, facts)) {
+    return {
+      shouldReply: false,
+      text: "",
+      safetyReason: "Reply blocked: attribution to resident/participant not backed by a single_resident-trust fact",
+      usedFactIds: []
+    };
+  }
+
   // Independent server-side protection against invented biography/personal experience.
   if (containsFabricatedPersonalExperience(parsed.reply)) {
     return {
@@ -303,7 +316,7 @@ const ORCHESTRATOR_PROMPT = [
   "Для local-вопроса всему чату выбирай should_search_memory=true. Если подходящих фактов городской памяти нет, итоговый серверный гейт заставит Алину промолчать.",
   "Упоминание имени Алина само по себе не означает запрос: благодарность, обсуждение Алины и обычная реплика могут требовать молчания.",
   "Для каждого запроса определи request_scope: local, global или mixed.",
-  "local — ответ зависит от конкретного города, конкретной местной организации или объекта: врачи, садики, школы, магазины, мастера, услуги, организации, адреса, телефоны, графики, события, отключения, цены, условия приёма конкретной школы и другие местные сведения. Для local нужны факты городской памяти.",
+  "local — ответ зависит от конкретного города, конкретной местной организации или объекта: врачи, садики, школы, магазины, мастера, услуги, организации, адреса, телефоны, графики, события, отключения, цены, условия приёма конкретной школы и другие местные сведения. Формулировки «где купить», «где можно купить», «где найти», «где можно найти», «где продают», «где заказать», «где можно заказать», «куда обратиться», «кто делает», «кто продаёт» в контексте города — это тоже local, даже если сам предмет запроса не выглядит специфично городским. Для local нужны факты городской памяти.",
   "global — вопрос не зависит от города или конкретной местной организации. Для global не ищи городскую память: should_search_memory=false. Если сообщение адресовано Алине и безопасно, можно отвечать из общих знаний модели.",
   "mixed — вопрос сочетает общую и локальную часть. Для публикации mixed-ответа также нужны факты городской памяти, потому что ответ может быть воспринят как локальная рекомендация или локальное правило.",
   "Не выдумывай организации, врачей, адреса, телефоны, цены, графики, документы, услуги, отзывы, правила конкретных учреждений или поведение их сотрудников.",
@@ -340,6 +353,7 @@ const FINAL_REPLY_PROMPT = [
   "Ты формируешь окончательный ответ городского ИИ-помощника Алины.",
   "Алина — ИИ. У неё нет личной биографии, родственников, детей, знакомых, собственного опыта посещения школ, врачей, магазинов, организаций или использования услуг.",
   "Никогда не присваивай Алине опыт участниц и не пиши «из моего опыта», «у меня сын/дочь/племянник», «я лично ходила/обращалась/училась/покупала» и подобные заявления.",
+  "Никогда не приписывай утверждение участнице, резиденту, жителю или чату, если конкретный использованный факт не имеет trust=single_resident. Если данных нет, нельзя писать «как упоминал один из резидентов», «в чате советовали», «одна из участниц рекомендовала», «по словам местных» и аналогичные формулировки. Не создавай источник или атрибуцию для заполнения пробела в данных.",
   "Для local и mixed любые конкретные местные утверждения разрешены только из списка РАЗРЕШЁННЫХ ФАКТОВ ИЗ ГОРОДСКОЙ ПАМЯТИ.",
   "Если request_scope=local или mixed, каждый опубликованный ответ обязан использовать хотя бы один переданный факт и указать его id в used_fact_ids. Иначе should_publish=false.",
   "Не используй исходное сообщение пользователя как доказательство местных фактов. Оно показывает только запрос.",
@@ -496,6 +510,59 @@ function displayAuthor(channel: MaxEngagementChannelRecord, message: MaxEngageme
 
 function channelBotName(channel: MaxEngagementChannelRecord): string {
   return channel.botName?.trim() || "Алина";
+}
+
+// KNOWN LIMITATION:
+// This only verifies that at least one cited used_fact_id has trust=single_resident.
+// It does NOT verify that the cited fact is topically related to this attribution.
+// Fully closing that gap would require a separate resident_attribution_fact_ids
+// field from the model and a server-side subset/trust validation.
+export function containsUnsupportedResidentAttribution(
+  text: string,
+  usedFactIds: string[],
+  facts: Array<{ id: string; trust: string }>
+): boolean {
+  const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
+
+  const attributionPatterns = [
+    /(?:^|[^\p{L}\p{N}])как (?:упоминал\p{L}*|советовал\p{L}*|рекомендовал\p{L}*|писал\p{L}*|говорил\p{L}*) (?:один из резидентов|одна из участниц|кто-то из участниц|кто-то из резидентов|кто-то)(?=[^\p{L}\p{N}]|$)/u,
+    /(?:^|[^\p{L}\p{N}])(?:один из резидентов|одна из участниц|кто-то из участниц|кто-то из резидентов|участницы|резиденты) (?:упоминал\p{L}*|советовал\p{L}*|рекомендовал\p{L}*|писал\p{L}*|говорил\p{L}*)(?=[^\p{L}\p{N}]|$)/u,
+    /(?:^|[^\p{L}\p{N}])(?:в чате|здесь) (?:писал\p{L}*|советовал\p{L}*|рекомендовал\p{L}*|упоминал\p{L}*)(?=[^\p{L}\p{N}]|$)/u,
+    /(?:^|[^\p{L}\p{N}])по словам (?:резидентов|участниц|местных)(?=[^\p{L}\p{N}]|$)/u
+  ];
+
+  if (!attributionPatterns.some((pattern) => pattern.test(normalized))) {
+    return false;
+  }
+
+  const factsById = new Map(facts.map((fact) => [fact.id, fact]));
+  const usedResidentFacts = usedFactIds.filter((id) => factsById.get(id)?.trust === "single_resident");
+  return usedResidentFacts.length === 0;
+}
+
+// Deterministic override for the LLM's own local/global classification.
+// Prompt instructions are not guaranteed: explicit "where can I buy/find/order",
+// "where should I go", and "who sells/does" queries are local lookups even if the
+// requested item itself is generic.
+export function isExplicitLocalLookupRequest(text: string): boolean {
+  const end = String.raw`(?=[^\p{L}\p{N}]|$)`;
+  const pattern = new RegExp(
+    String.raw`(?:^|\s)(?:где\s+(?:можно\s+)?(?:купить|найти|заказать|продают)|куда\s+обратиться|кто\s+(?:делает|прода[её]т))${end}`,
+    "iu"
+  );
+  return pattern.test(text);
+}
+
+function applyDeterministicLocalLookupOverride(
+  plan: CityAssistantPlan,
+  messageText: string
+): CityAssistantPlan {
+  if (plan.requestScope !== "global") return plan;
+  if (!isExplicitLocalLookupRequest(messageText)) return plan;
+
+  // requestScope alone is not enough: shouldSearchMemory was already computed
+  // from the LLM's original "global" classification, so force memory search too.
+  return { ...plan, requestScope: "local", shouldSearchMemory: true };
 }
 
 function containsFabricatedPersonalExperience(text: string): boolean {
