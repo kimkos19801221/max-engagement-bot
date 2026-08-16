@@ -1,5 +1,6 @@
 import type { CityMemorySearchResult, CityMemoryCandidate } from "../city-memory/types.js";
 import type { MaxEngagementChannelRecord, MaxEngagementChatMessageRecord } from "./types.js";
+import type { ContactDirectoryRecord } from "./contact-directory.js";
 import { requestOpenAIResponses, type OpenAIResponsesData } from "./openai-responses.js";
 
 type StructuredOutputFormat = {
@@ -153,6 +154,8 @@ export type CityAssistantReply = {
   text: string;
   safetyReason: string;
   usedFactIds: string[];
+  usedContactIds?: string[];
+  requestScope?: typeof REQUEST_SCOPES[number];
 };
 
 export function buildFallbackCityReply(input: {
@@ -168,6 +171,170 @@ export function buildFallbackCityReply(input: {
     text: "",
     safetyReason: `Fallback silent: ${input.reason}`,
     usedFactIds: []
+  };
+}
+
+
+const AGENT_REPLY_FORMAT: StructuredOutputFormat = {
+  name: "city_group_agent_decision",
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      should_reply: { type: "boolean" },
+      request_scope: { type: "string", enum: [...REQUEST_SCOPES] },
+      reply: { type: "string" },
+      used_fact_ids: { type: "array", items: { type: "string" } },
+      used_contact_ids: { type: "array", items: { type: "string" } },
+      reason: { type: "string" }
+    },
+    required: ["should_reply", "request_scope", "reply", "used_fact_ids", "used_contact_ids", "reason"]
+  }
+};
+
+const GROUP_AGENT_PROMPT = [
+  "Ты — Алина, ИИ-помощник внутри живого городского группового чата.",
+  "Прочитай разговор целиком и сама реши, нужно ли вмешиваться. Не отвечай ради самого ответа.",
+  "Отвечай только когда можешь заметно помочь: дать конкретную полезную информацию, практичный следующий шаг, понятное объяснение, релевантный сохранённый контакт или важное уточнение.",
+  "Если участницы уже нормально ответили, разговор идёт сам, твой ответ будет очевидным, повторит вопрос или добавит только воду — should_reply=false.",
+  "Пиши естественно, по-человечески и по делу. Не пересказывай вопрос перед ответом и не используй канцелярские фразы вроде «резидентка интересовалась».",
+  "Не раскрывай внутренние слова базы: trust, fact_id, resident, source, memory. Если уместно указать происхождение единичной рекомендации, естественно скажи «в чате советовали» или «одна из участниц писала».",
+  "ИСТОРИЯ ЧАТА — только контекст разговора. Она помогает понять, что уже сказано и нужен ли ответ, но НЕ является разрешённым источником конкретных местных фактов.",
+  "РАЗРЕШЁННЫЕ ФАКТЫ ГОРОДА и РАЗРЕШЁННЫЕ КОНТАКТЫ — единственные источники конкретных местных сведений в твоём ответе.",
+  "Для общих вопросов, не зависящих от города, используй общие знания и здравый смысл.",
+  "Для local/mixed вопроса не выдумывай магазин, врача, организацию, адрес, телефон, цену, график, услугу или местное правило. Если полезного разрешённого факта/контакта нет — лучше промолчи.",
+  "Если используешь местный факт, перечисли его id в used_fact_ids. Если используешь контакт, перечисли его id в used_contact_ids. Не указывай id, которых тебе не дали.",
+  "Если выбираешь контакт, упомяни в reply его имя/категорию естественно; сама карточка контакта будет приложена сервером.",
+  "У Алины нет собственной биографии, детей, родственников и личного опыта посещения мест или пользования услугами. Никогда не выдумывай такой опыт.",
+  "В медицинских, юридических и финансовых темах можно давать полезную общую информацию и практичные безопасные шаги, но не придумывай локальные правила и не выдавай догадки за факт.",
+  "Верни только JSON по заданной схеме."
+].join("\n");
+
+export async function decideCityReply(input: {
+  channel: MaxEngagementChannelRecord;
+  message: MaxEngagementChatMessageRecord;
+  recentMessages: MaxEngagementChatMessageRecord[];
+  replyToMessage?: MaxEngagementChatMessageRecord | null;
+  memory: CityMemorySearchResult[];
+  contacts: ContactDirectoryRecord[];
+}): Promise<CityAssistantReply> {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) {
+    return { shouldReply: false, text: "", safetyReason: "OpenAI API key is missing; chat reply skipped", usedFactIds: [], usedContactIds: [] };
+  }
+
+  const facts = flattenFacts(input.memory);
+  const contacts = input.contacts.slice(0, 8).map((contact) => ({
+    id: contact.id,
+    category: contact.category,
+    contact_name: contact.contactName,
+    phone: contact.phone,
+    times_shared: contact.timesShared
+  }));
+
+  const raw = await requestOpenAI({
+    apiKey,
+    maxOutputTokens: 900,
+    temperature: 0.45,
+    format: AGENT_REPLY_FORMAT,
+    instructions: GROUP_AGENT_PROMPT,
+    input: [
+      `ГОРОДСКОЙ ЧАТ: ${input.channel.title}`,
+      "ПОСЛЕДНИЕ СООБЩЕНИЯ ЧАТА (НЕПРОВЕРЕННЫЙ КОНТЕКСТ, НЕ ИСТОЧНИК ЛОКАЛЬНЫХ ФАКТОВ):",
+      formatHistory(input.channel, input.recentMessages, input.message.id, 40) || "История отсутствует.",
+      "СООБЩЕНИЕ, НА КОТОРОЕ ОТВЕЧАЮТ:",
+      input.replyToMessage ? `${displayAuthor(input.channel, input.replyToMessage)}: ${input.replyToMessage.text}` : "нет",
+      "РАЗРЕШЁННЫЕ ФАКТЫ ГОРОДА:",
+      facts.length ? facts.map((fact) => JSON.stringify(fact)).join("\n") : "Фактов нет.",
+      "РАЗРЕШЁННЫЕ КОНТАКТЫ ГОРОДА:",
+      contacts.length ? contacts.map((contact) => JSON.stringify(contact)).join("\n") : "Контактов нет.",
+      "ТЕКУЩЕЕ СООБЩЕНИЕ:",
+      `${input.message.authorName || "Участница"}: ${input.message.text}`
+    ].join("\n\n")
+  });
+
+  const parsed = parseAgentReply(raw);
+  if (!parsed.shouldReply || !parsed.reply.trim()) {
+    return {
+      shouldReply: false,
+      text: "",
+      safetyReason: `AI agent decision: ${parsed.reason}`,
+      usedFactIds: [],
+      usedContactIds: [],
+      requestScope: parsed.requestScope
+    };
+  }
+
+  const allowedFactIds = new Set(facts.map((fact) => fact.id));
+  const allowedContactIds = new Set(input.contacts.map((contact) => contact.id));
+  if (parsed.usedFactIds.some((id) => !allowedFactIds.has(id))) {
+    throw new Error("AI agent referenced a fact that was not supplied by the server");
+  }
+  if (parsed.usedContactIds.some((id) => !allowedContactIds.has(id))) {
+    throw new Error("AI agent referenced a contact that was not supplied by the server");
+  }
+
+  const effectiveScope = isExplicitLocalLookupRequest(input.message.text) ? "local" : parsed.requestScope;
+  if (effectiveScope !== "global" && parsed.usedFactIds.length === 0 && parsed.usedContactIds.length === 0) {
+    return {
+      shouldReply: false,
+      text: "",
+      safetyReason: "Local/mixed reply blocked: no grounded fact or contact selected",
+      usedFactIds: [],
+      usedContactIds: [],
+      requestScope: effectiveScope
+    };
+  }
+
+  if (containsUnsupportedResidentAttribution(parsed.reply, parsed.usedFactIds, facts)) {
+    return {
+      shouldReply: false,
+      text: "",
+      safetyReason: "Reply blocked: attribution to resident/participant not backed by a single_resident-trust fact",
+      usedFactIds: [],
+      usedContactIds: [],
+      requestScope: effectiveScope
+    };
+  }
+
+  if (containsFabricatedPersonalExperience(parsed.reply)) {
+    return {
+      shouldReply: false,
+      text: "",
+      safetyReason: "Reply blocked: fabricated personal experience/biography",
+      usedFactIds: [],
+      usedContactIds: [],
+      requestScope: effectiveScope
+    };
+  }
+
+  return {
+    shouldReply: true,
+    text: parsed.reply.slice(0, 1800),
+    safetyReason: `AI agent decision: ${parsed.reason}`,
+    usedFactIds: parsed.usedFactIds,
+    usedContactIds: parsed.usedContactIds,
+    requestScope: effectiveScope
+  };
+}
+
+function parseAgentReply(text: string): {
+  shouldReply: boolean;
+  requestScope: typeof REQUEST_SCOPES[number];
+  reply: string;
+  usedFactIds: string[];
+  usedContactIds: string[];
+  reason: string;
+} {
+  const value = parseStrictJson(text);
+  assertOnlyKeys(value, ["should_reply", "request_scope", "reply", "used_fact_ids", "used_contact_ids", "reason"], "city group agent decision");
+  return {
+    shouldReply: booleanValue(value.should_reply, "should_reply"),
+    requestScope: enumValue(value.request_scope, REQUEST_SCOPES, "request_scope"),
+    reply: stringValue(value.reply, "reply", 4000),
+    usedFactIds: stringArray(value.used_fact_ids, "used_fact_ids", 20, 200),
+    usedContactIds: stringArray(value.used_contact_ids, "used_contact_ids", 10, 200),
+    reason: stringValue(value.reason, "reason", 600)
   };
 }
 
@@ -711,4 +878,4 @@ function extractText(data: OpenAIResponsesData): string {
   return (data.output ?? []).flatMap((item) => item.content ?? [])
     .filter((item) => item.type === "output_text" && typeof item.text === "string")
     .map((item) => item.text).join("\n");
-}
+    }

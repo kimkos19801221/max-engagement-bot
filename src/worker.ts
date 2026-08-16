@@ -3,13 +3,14 @@ import { config as loadDotenv } from "dotenv";
 
 import { hasStopTrigger, looksLikeQuestion } from "./max-engagement/content-safety.js";
 import { generateDryRunDraft, generatePostInitiativeDraft } from "./max-engagement/draft-generator.js";
-import { analyzeCityMessage, buildFallbackCityReply, generateCityReply, type CityAssistantPlan } from "./max-engagement/city-assistant.js";
+import { buildFallbackCityReply, decideCityReply, type CityAssistantReply } from "./max-engagement/city-assistant.js";
 import { moderateChatMessage } from "./max-engagement/antispam.js";
 import {
   buildMaxContactAttachments,
   classifyProfessionalContactAttachment,
   formatContactDirectoryText,
-  hasRawAttachments
+  hasRawAttachments,
+  type ContactDirectoryRecord
 } from "./max-engagement/contact-directory.js";
 import { extractCityMemoryCandidatesFromMessage } from "./max-engagement/city-memory-extractor.js";
 import { createMaxClientFromEnv } from "./max-engagement/max-client.js";
@@ -245,7 +246,7 @@ async function processChatMessage(
   const [replyCountHour, replyCountDay, recentMessages] = await Promise.all([
     repository.countActions(channel.id, "reply", new Date(Date.now() - HOUR_MS).toISOString()),
     repository.countActions(channel.id, "reply", new Date(Date.now() - DAY_MS).toISOString()),
-    repository.listRecentChatMessages(channel.id, message.postedAt, 30)
+    repository.listRecentChatMessages(channel.id, message.postedAt, 40)
   ]);
 
   if (replyCountHour >= channel.replyLimitHour || replyCountDay >= channel.replyLimitDay) {
@@ -262,44 +263,8 @@ async function processChatMessage(
     ? recentMessages.find((item) => item.maxMessageId === message.replyToMaxMessageId) ?? null
     : null;
 
-  const memoryPreview = await repository.searchCityMemory({
-    query: message.text,
-    channelId: channel.id,
-    limit: 8
-  });
-
-  let plan;
-  try {
-    plan = await analyzeCityMessage({ channel, message, recentMessages, replyToMessage, memoryPreview });
-  } catch (error) {
-    const reason = `OpenAI chat analysis skipped: ${error instanceof Error ? error.message : String(error)}`;
-    return await createAndMaybePublishChatReply({
-      repository,
-      maxClient,
-      channel,
-      message,
-      draft: buildFallbackCityReply({ channel, message, reason })
-    });
-  }
-
-  const hardBlockedRisk =
-    plan.riskBehavior === "silent" ||
-    plan.riskBehavior === "moderation_review" ||
-    plan.risk === "personal_data" ||
-    plan.risk === "accusation" ||
-    plan.risk === "unverified_treatment";
-
-  if (hardBlockedRisk) {
-    await repository.createBotAction({
-      channelId: channel.id, postId: null, chatMessageId: message.id, threadId: null, triggerCommentId: null,
-      actionType: "reply", status: "skipped", requestedTeasingLevel: 0, finalTeasingLevel: 0,
-      safetyReason: `Server risk guard: ${plan.risk}/${plan.riskBehavior}; ${plan.reason}`,
-      generatedText: null, requiresHumanReview: plan.riskBehavior === "moderation_review"
-    });
-    await repository.markChatMessageProcessed(message.id);
-    return "skipped";
-  }
-
+  // Background learning is independent from the public reply decision. Every useful
+  // resident message may enrich city memory, while the main agent remains free to stay silent.
   try {
     const extractedMemory = await extractCityMemoryCandidatesFromMessage({
       channel,
@@ -321,51 +286,44 @@ async function processChatMessage(
     console.error(`City memory extraction skipped for ${message.id}: ${formatWorkerError(error)}`);
   }
 
-  const contactReply = await tryPublishContactDirectoryReply({
-    repository,
-    maxClient,
-    channel,
-    message,
-    plan
-  });
-  if (contactReply) {
-    return contactReply;
-  }
-
-  if (plan.shouldSaveMemory && plan.memoryCandidate) {
-    try {
-      await repository.ingestCityMemoryCandidate({
-        channel,
-        sourceId: message.maxMessageId || message.id,
-        authorName: message.authorName,
-        text: message.text,
-        receivedAt: message.postedAt,
-        candidate: plan.memoryCandidate
-      });
-    } catch (error) {
-      console.error(`City memory save skipped for ${message.id}: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
-  const memoryQuery = plan.searchTerms.length > 0
-    ? plan.searchTerms.join(" ")
-    : [plan.category, plan.subcategory, message.text].filter(Boolean).join(" ");
-  const memory = plan.shouldSearchMemory
-    ? await repository.searchCityMemory({ query: memoryQuery, channelId: channel.id, limit: 6 })
-    : [];
-
-  const latestMessages = await repository.listRecentChatMessages(channel.id, null, 30);
-  let draft;
+  // Retrieval happens before the one public-decision model call. Raw chat history is
+  // conversation context only; concrete local claims may come only from these stores.
+  const retrievalQuery = [message.text, replyToMessage?.text ?? ""].filter(Boolean).join(" ").slice(0, 2000);
+  let memory = [] as Awaited<ReturnType<EngagementRepository["searchCityMemory"]>>;
+  let contacts: ContactDirectoryRecord[] = [];
   try {
-    draft = await generateCityReply({ channel, message, recentMessages: latestMessages, plan, memory });
+    [memory, contacts] = await Promise.all([
+      repository.searchCityMemory({ query: retrievalQuery || message.text, channelId: channel.id, limit: 10 }),
+      repository.searchContactDirectory({
+        channel,
+        query: { text: retrievalQuery || message.text },
+        limit: 6
+      })
+    ]);
   } catch (error) {
-    const reason = `OpenAI final reply skipped: ${error instanceof Error ? error.message : String(error)}`;
+    console.error(`[worker] city_context_retrieval_failed channel=${channel.id} message=${message.id}: ${formatWorkerError(error)}`);
+  }
+
+  const latestMessages = await repository.listRecentChatMessages(channel.id, null, 40);
+  let draft: CityAssistantReply;
+  try {
+    draft = await decideCityReply({
+      channel,
+      message,
+      recentMessages: latestMessages,
+      replyToMessage,
+      memory,
+      contacts
+    });
+  } catch (error) {
+    const reason = `OpenAI city agent skipped: ${error instanceof Error ? error.message : String(error)}`;
     return await createAndMaybePublishChatReply({
       repository,
       maxClient,
       channel,
       message,
-      draft: buildFallbackCityReply({ channel, message, reason })
+      draft: buildFallbackCityReply({ channel, message, reason }),
+      availableContacts: contacts
     });
   }
 
@@ -374,7 +332,8 @@ async function processChatMessage(
     maxClient,
     channel,
     message,
-    draft
+    draft,
+    availableContacts: contacts
   });
 }
 
@@ -383,7 +342,8 @@ async function createAndMaybePublishChatReply(input: {
   maxClient: ChatClient;
   channel: MaxEngagementChannelRecord;
   message: MaxEngagementChatMessageRecord;
-  draft: { shouldReply: boolean; text: string; safetyReason: string };
+  draft: CityAssistantReply;
+  availableContacts?: ContactDirectoryRecord[];
 }): Promise<ProcessedResult> {
   const { repository, maxClient, channel, message, draft } = input;
 
@@ -399,6 +359,11 @@ async function createAndMaybePublishChatReply(input: {
     return isError ? "failed" : "skipped";
   }
 
+  const selectedContacts = (input.availableContacts ?? []).filter((contact) =>
+    (draft.usedContactIds ?? []).includes(contact.id)
+  );
+  const attachments = buildMaxContactAttachments(selectedContacts);
+
   let status: "draft" | "posted" | "failed" = channel.dryRun ? "draft" : "posted";
   let postedMaxCommentId: string | null = null;
   let errorMessage: string | null = null;
@@ -407,68 +372,8 @@ async function createAndMaybePublishChatReply(input: {
       const published = await maxClient.sendChatMessage({
         chatId: channel.maxChannelId,
         text: draft.text,
-        replyToMessageId: message.maxMessageId
-      });
-      postedMaxCommentId = published.messageId;
-    } catch (error) {
-      status = "failed";
-      errorMessage = error instanceof Error ? error.message : String(error);
-    }
-  }
-
-  await repository.createBotAction({
-    channelId: channel.id, postId: null, chatMessageId: message.id, threadId: null, triggerCommentId: null,
-    actionType: "reply", status, requestedTeasingLevel: 0, finalTeasingLevel: 0,
-    safetyReason: draft.safetyReason, generatedText: draft.text, requiresHumanReview: channel.dryRun,
-    postedMaxCommentId, errorMessage
-  });
-  await repository.markChatMessageProcessed(message.id);
-  if (status === "posted") return "posted";
-  if (status === "failed") return "failed";
-  return "drafted";
-}
-
-async function tryPublishContactDirectoryReply(input: {
-  repository: EngagementRepository;
-  maxClient: ChatClient;
-  channel: MaxEngagementChannelRecord;
-  message: MaxEngagementChatMessageRecord;
-  plan: CityAssistantPlan;
-}): Promise<ProcessedResult | null> {
-  const { repository, maxClient, channel, message, plan } = input;
-  if (!plan.shouldReply || plan.requestScope === "global" || plan.alreadyAnsweredByParticipants) {
-    return null;
-  }
-  if (!contactQueryLooksUseful(plan, message)) {
-    return null;
-  }
-
-  const contacts = await repository.searchContactDirectory({
-    channel,
-    query: {
-      text: message.text,
-      category: plan.category,
-      subcategory: plan.subcategory,
-      searchTerms: plan.searchTerms
-    },
-    limit: 3
-  });
-  if (contacts.length === 0) return null;
-
-  const text = formatContactDirectoryText(contacts).slice(0, 1800);
-  const attachments = buildMaxContactAttachments(contacts);
-  let status: "draft" | "posted" | "failed" = channel.dryRun ? "draft" : "posted";
-  let postedMaxCommentId: string | null = null;
-  let errorMessage: string | null = null;
-  let usedFallback = false;
-
-  if (!channel.dryRun) {
-    try {
-      const published = await maxClient.sendChatMessage({
-        chatId: channel.maxChannelId,
-        text,
         replyToMessageId: message.maxMessageId,
-        attachments
+        attachments: attachments.length ? attachments : undefined
       });
       postedMaxCommentId = published.messageId;
     } catch (error) {
@@ -476,11 +381,15 @@ async function tryPublishContactDirectoryReply(input: {
         status = "failed";
         errorMessage = error instanceof Error ? error.message : String(error);
       } else {
-        usedFallback = true;
         try {
+          const fallbackDetails = formatContactDirectoryText(selectedContacts).trim();
+          const fallbackText = fallbackDetails && !draft.text.includes(fallbackDetails)
+            ? `${draft.text}
+${fallbackDetails}`.slice(0, 1800)
+            : draft.text;
           const published = await maxClient.sendChatMessage({
             chatId: channel.maxChannelId,
-            text,
+            text: fallbackText,
             replyToMessageId: message.maxMessageId
           });
           postedMaxCommentId = published.messageId;
@@ -494,40 +403,15 @@ async function tryPublishContactDirectoryReply(input: {
   }
 
   await repository.createBotAction({
-    channelId: channel.id,
-    postId: null,
-    chatMessageId: message.id,
-    threadId: null,
-    triggerCommentId: null,
-    actionType: "reply",
-    status,
-    requestedTeasingLevel: 0,
-    finalTeasingLevel: 0,
-    safetyReason: usedFallback
-      ? `Contact directory match: ${contacts.length}; text fallback used`
-      : `Contact directory match: ${contacts.length}`,
-    generatedText: text,
-    requiresHumanReview: channel.dryRun,
-    postedMaxCommentId,
-    errorMessage
+    channelId: channel.id, postId: null, chatMessageId: message.id, threadId: null, triggerCommentId: null,
+    actionType: "reply", status, requestedTeasingLevel: 0, finalTeasingLevel: 0,
+    safetyReason: draft.safetyReason, generatedText: draft.text, requiresHumanReview: channel.dryRun,
+    postedMaxCommentId, errorMessage
   });
   await repository.markChatMessageProcessed(message.id);
   if (status === "posted") return "posted";
   if (status === "failed") return "failed";
   return "drafted";
-}
-
-function contactQueryLooksUseful(plan: CityAssistantPlan, message: MaxEngagementChatMessageRecord): boolean {
-  const text = [
-    message.text,
-    plan.category,
-    plan.subcategory,
-    ...plan.searchTerms
-  ].join(" ").toLowerCase();
-  return (
-    /\b(contact|service|master|specialist)\b/i.test(text) ||
-    /(контакт|телефон|номер|мастер|специалист|посовет|порекоменду|нужен|нужна|маникюр|ногт|сантехник|электрик|ремонт|нян|репетитор|парикмахер|визаж|массаж|логопед|психолог|уборк|клининг)/iu.test(text)
-  );
 }
 
 async function processPostSafely(
