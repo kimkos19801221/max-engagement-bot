@@ -58,6 +58,37 @@ export function hasRawAttachments(message: MaxEngagementChatMessageRecord): bool
   return Array.isArray(message.rawAttachments) && message.rawAttachments.length > 0;
 }
 
+export function hasContactAttachment(message: MaxEngagementChatMessageRecord): boolean {
+  return getContactAttachments(message.rawAttachments ?? []).length > 0;
+}
+
+export function buildFallbackContactDirectoryCandidate(input: {
+  message: MaxEngagementChatMessageRecord;
+  recentMessages: MaxEngagementChatMessageRecord[];
+}): ContactDirectoryCandidate | null {
+  const contactAttachments = getContactAttachments(input.message.rawAttachments ?? []);
+  if (contactAttachments.length === 0) return null;
+
+  const context = [
+    ...input.recentMessages
+      .filter((item) => item.id !== input.message.id)
+      .slice(-8)
+      .map((item) => `${item.authorName || "Участница"}: ${item.text || "[сообщение без текста]"}`),
+    input.message.text
+  ].filter(Boolean).join("\n").slice(-4000);
+  const rawAttachment = contactAttachments.length === 1 ? contactAttachments[0] : contactAttachments;
+
+  return {
+    category: inferContactCategoryFromContext(context),
+    contactName: extractLikelyName(rawAttachment),
+    phone: extractLikelyPhone(rawAttachment),
+    maxContactId: extractLikelyContactId(rawAttachment),
+    attachmentFingerprint: fingerprintAttachment(rawAttachment),
+    rawAttachment,
+    sourceContext: context
+  };
+}
+
 export async function classifyProfessionalContactAttachment(input: {
   channel: MaxEngagementChannelRecord;
   message: MaxEngagementChatMessageRecord;
@@ -143,7 +174,14 @@ export async function classifyProfessionalContactAttachment(input: {
   const category = normalizeCategory(parsed.category);
   if (!parsed.is_professional_contact || !category) return null;
 
-  const rawAttachment = attachments.length === 1 ? attachments[0] : attachments;
+  const contactAttachments = getContactAttachments(attachments);
+  const rawAttachment = contactAttachments.length === 1
+    ? contactAttachments[0]
+    : contactAttachments.length > 1
+      ? contactAttachments
+      : attachments.length === 1
+        ? attachments[0]
+        : attachments;
   const phone = extractLikelyPhone(rawAttachment);
   const maxContactId = extractLikelyContactId(rawAttachment);
   const contactName = parsed.contact_name.trim().slice(0, 200) || extractLikelyName(rawAttachment);
@@ -250,7 +288,7 @@ function extractOutputText(data: {
 
 function extractLikelyPhone(value: unknown): string | null {
   const found = findStringByKey(value, /(phone|telephone|mobile|vcf_phone|tel)/i);
-  return normalizePhone(found);
+  return normalizePhone(found) ?? normalizePhone(extractVcardField(value, "TEL"));
 }
 
 function extractLikelyContactId(value: unknown): string | null {
@@ -260,7 +298,81 @@ function extractLikelyContactId(value: unknown): string | null {
 
 function extractLikelyName(value: unknown): string | null {
   const found = findStringByKey(value, /^(name|display_name|contact_name|first_name)$/i);
-  return found?.trim().slice(0, 200) || null;
+  return found?.trim().slice(0, 200) || extractVcardField(value, "FN");
+}
+
+function getContactAttachments(attachments: unknown[]): unknown[] {
+  return attachments
+    .map(unwrapContactAttachment)
+    .filter((item): item is unknown => item !== null);
+}
+
+function unwrapContactAttachment(value: unknown): unknown | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (row.kind === "contact" && row.raw !== undefined) return row.raw;
+  if (row.type === "contact") return value;
+  if (row.payload && typeof row.payload === "object" && !Array.isArray(row.payload)) {
+    const payload = row.payload as Record<string, unknown>;
+    if (typeof payload.vcf_info === "string") return value;
+  }
+  return null;
+}
+
+function extractVcardField(value: unknown, field: "FN" | "TEL"): string | null {
+  const vcard = findStringByKey(value, /^vcf_info$/i);
+  if (!vcard) return null;
+  const line = vcard
+    .replace(/\r?\n[ \t]/g, "")
+    .split(/\r?\n/u)
+    .find((item) => {
+      const property = item.split(":", 1)[0]?.split(";", 1)[0]?.toUpperCase();
+      return property === field || property?.endsWith(`.${field}`);
+    });
+  if (!line) return null;
+  const separator = line.indexOf(":");
+  if (separator < 0) return null;
+  const property = line.slice(0, separator);
+  const raw = line.slice(separator + 1);
+  const result = /ENCODING=QUOTED-PRINTABLE/i.test(property)
+    ? decodeQuotedPrintableUtf8(raw)
+    : raw.trim();
+  return result ? result.slice(0, 200) : null;
+}
+
+function decodeQuotedPrintableUtf8(value: string): string {
+  const bytes: number[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === "=" && /^[0-9A-Fa-f]{2}$/u.test(value.slice(index + 1, index + 3))) {
+      bytes.push(Number.parseInt(value.slice(index + 1, index + 3), 16));
+      index += 2;
+    } else {
+      bytes.push(...Buffer.from(char, "utf8"));
+    }
+  }
+  return Buffer.from(bytes).toString("utf8").trim();
+}
+
+function inferContactCategoryFromContext(value: string): string {
+  const normalized = value
+    .toLowerCase()
+    .replace(/\u0451/g, "\u0435")
+    .replace(/[^\p{L}\p{N} -]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (/(?:торт|десерт|капкейк|кондитер|выпеч)/u.test(normalized)) return "кондитер";
+  if (/(?:маникюр|ногт)/u.test(normalized)) return "мастер маникюра";
+  if (/сантех/u.test(normalized)) return "сантехник";
+  if (/электр/u.test(normalized)) return "электрик";
+  if (/(?:парик|стриж|волос)/u.test(normalized)) return "парикмахер";
+  if (/(?:репет|урок|занят)/u.test(normalized)) return "репетитор";
+  if (/(?:нян|сидел)/u.test(normalized)) return "няня";
+  if (/массаж/u.test(normalized)) return "массажист";
+  if (/логопед/u.test(normalized)) return "логопед";
+  if (/психол/u.test(normalized)) return "психолог";
+  if (/(?:убор|клинин)/u.test(normalized)) return "клининг";
+  return "контакт";
 }
 
 function findStringByKey(value: unknown, keyPattern: RegExp): string | null {
@@ -348,10 +460,15 @@ function expandContactToken(token: string): string[] {
   if (/\u0443\u0431\u043e\u0440|\u043a\u043b\u0438\u043d\u0438\u043d/u.test(token)) {
     result.push("\u043a\u043b\u0438\u043d\u0438\u043d\u0433");
   }
+  if (/\u0442\u043e\u0440\u0442|\u0434\u0435\u0441\u0435\u0440\u0442|\u043a\u043e\u043d\u0434\u0438\u0442|\u0432\u044b\u043f\u0435\u0447/u.test(token)) {
+    result.push("\u043a\u043e\u043d\u0434\u0438\u0442\u0435\u0440", "\u0442\u043e\u0440\u0442\u044b", "\u0434\u0435\u0441\u0435\u0440\u0442\u044b");
+  }
   return result;
 }
 
 function normalizeMaxContactAttachment(value: unknown): Record<string, unknown> | null {
+  const unwrapped = unwrapContactAttachment(value);
+  if (unwrapped) value = unwrapped;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   if (row.type !== "contact") return null;

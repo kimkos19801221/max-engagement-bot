@@ -1,4 +1,4 @@
-import type { CityMemorySearchResult, CityMemoryCandidate } from "../city-memory/types.js";
+import type { CityMemorySearchResult } from "../city-memory/types.js";
 import type { MaxEngagementChannelRecord, MaxEngagementChatMessageRecord } from "./types.js";
 import type { ContactDirectoryRecord } from "./contact-directory.js";
 import { requestOpenAIResponses, type OpenAIResponsesData } from "./openai-responses.js";
@@ -32,7 +32,7 @@ const ORCHESTRATOR_FORMAT: StructuredOutputFormat = {
       action: { type: "string", enum: [...ACTIONS] },
       should_reply: { type: "boolean" },
       should_search_memory: { type: "boolean" },
-      should_save_memory: { type: "boolean" },
+      should_search_contacts: { type: "boolean" },
       category: { type: "string" },
       subcategory: { type: "string" },
       search_terms: { type: "array", items: { type: "string" } },
@@ -44,46 +44,6 @@ const ORCHESTRATOR_FORMAT: StructuredOutputFormat = {
       already_answered_by_participants: { type: "boolean" },
       intervention_useful: { type: "boolean" },
       reason: { type: "string" },
-      memory_candidate: {
-        anyOf: [
-          { type: "null" },
-          {
-            type: "object",
-            additionalProperties: false,
-            properties: {
-              object_type: {
-                type: "string",
-                enum: ["organization", "institution", "place", "service", "event", "temporary_change", "recommendation", "topic"]
-              },
-              object_name: { type: "string" },
-              aliases: { type: "array", items: { type: "string" } },
-              categories: { type: "array", items: { type: "string" } },
-              related_terms: { type: "array", items: { type: "string" } },
-              knowledge_kind: {
-                type: "string",
-                enum: ["address", "contact", "service", "hours", "event", "temporary_change", "resident_recommendation", "correction", "summary"]
-              },
-              content: { type: "string" },
-              // Bounded in the schema and validated again at runtime.
-              confidence: { type: "number", minimum: 0, maximum: 1 },
-              valid_until: {
-                anyOf: [{ type: "string" }, { type: "null" }]
-              }
-            },
-            required: [
-              "object_type",
-              "object_name",
-              "aliases",
-              "categories",
-              "related_terms",
-              "knowledge_kind",
-              "content",
-              "confidence",
-              "valid_until"
-            ]
-          }
-        ]
-      }
     },
     required: [
       "message_type",
@@ -92,7 +52,7 @@ const ORCHESTRATOR_FORMAT: StructuredOutputFormat = {
       "action",
       "should_reply",
       "should_search_memory",
-      "should_save_memory",
+      "should_search_contacts",
       "category",
       "subcategory",
       "search_terms",
@@ -101,8 +61,7 @@ const ORCHESTRATOR_FORMAT: StructuredOutputFormat = {
       "risk_behavior",
       "already_answered_by_participants",
       "intervention_useful",
-      "reason",
-      "memory_candidate"
+      "reason"
     ]
   }
 };
@@ -116,6 +75,8 @@ const FINAL_REPLY_FORMAT: StructuredOutputFormat = {
       should_publish: { type: "boolean" },
       reply: { type: "string" },
       used_fact_ids: { type: "array", items: { type: "string" } },
+      used_contact_ids: { type: "array", items: { type: "string" } },
+      attributes_to_unnamed_resident: { type: "boolean" },
       unsupported_local_claims: { type: "boolean" },
       reason: { type: "string" }
     },
@@ -123,6 +84,8 @@ const FINAL_REPLY_FORMAT: StructuredOutputFormat = {
       "should_publish",
       "reply",
       "used_fact_ids",
+      "used_contact_ids",
+      "attributes_to_unnamed_resident",
       "unsupported_local_claims",
       "reason"
     ]
@@ -136,7 +99,7 @@ export type CityAssistantPlan = {
   action: typeof ACTIONS[number];
   shouldReply: boolean;
   shouldSearchMemory: boolean;
-  shouldSaveMemory: boolean;
+  shouldSearchContacts: boolean;
   category: string;
   subcategory: string;
   searchTerms: string[];
@@ -146,7 +109,6 @@ export type CityAssistantPlan = {
   alreadyAnsweredByParticipants: boolean;
   interventionUseful: boolean;
   reason: string;
-  memoryCandidate: CityMemoryCandidate | null;
 };
 
 export type CityAssistantReply = {
@@ -384,21 +346,30 @@ export async function generateCityReply(input: {
   recentMessages: MaxEngagementChatMessageRecord[];
   plan: CityAssistantPlan;
   memory: CityMemorySearchResult[];
+  contacts: ContactDirectoryRecord[];
 }): Promise<CityAssistantReply> {
   if (!input.plan.shouldReply) {
     return { shouldReply: false, text: "", safetyReason: `AI plan: ${input.plan.reason}`, usedFactIds: [] };
   }
 
   const facts = flattenFacts(input.memory);
+  const contacts = input.contacts.slice(0, 8).map((contact) => ({
+    id: contact.id,
+    category: contact.category,
+    contact_name: contact.contactName,
+    phone: contact.phone,
+    times_shared: contact.timesShared
+  }));
 
   // Hard server-side grounding gate: any answer with a local component must have
   // retrieved city-memory facts. Prefer silence to a plausible but unsupported claim.
-  if (input.plan.requestScope !== "global" && facts.length === 0) {
+  if (input.plan.requestScope !== "global" && facts.length === 0 && contacts.length === 0) {
     return {
       shouldReply: false,
       text: "",
-      safetyReason: "Local/mixed request blocked: no retrieved city-memory facts",
-      usedFactIds: []
+      safetyReason: "Local/mixed request blocked: no retrieved city facts or contacts",
+      usedFactIds: [],
+      usedContactIds: []
     };
   }
 
@@ -416,9 +387,12 @@ export async function generateCityReply(input: {
     input: [
       `ЧАТ: ${input.channel.title}`,
       `РЕШЕНИЕ ОРКЕСТРАТОРА: ${JSON.stringify(planToFinalPromptRecord(input.plan))}`,
-      "ВАЖНО: сырая история чата намеренно не передаётся финальному ответчику и не является источником фактов.",
+      "ПОСЛЕДНИЕ СООБЩЕНИЯ (только контекст разговора, не источник местных фактов):",
+      formatHistory(input.channel, input.recentMessages, input.message.id, 20) || "История отсутствует.",
       "РАЗРЕШЁННЫЕ ФАКТЫ ИЗ ГОРОДСКОЙ ПАМЯТИ:",
       facts.length ? facts.map((fact) => JSON.stringify(fact)).join("\n") : "Фактов нет.",
+      "РАЗРЕШЁННЫЕ КОНТАКТЫ:",
+      contacts.length ? contacts.map((contact) => JSON.stringify(contact)).join("\n") : "Контактов нет.",
       "ИСХОДНОЕ СООБЩЕНИЕ:",
       `${input.message.authorName || "Участница"}: ${input.message.text}`
     ].join("\n\n")
@@ -426,34 +400,42 @@ export async function generateCityReply(input: {
 
   const parsed = parseFinalReply(raw);
   if (!parsed.shouldPublish || !parsed.reply.trim()) {
-    return { shouldReply: false, text: "", safetyReason: `AI final decision: ${parsed.reason}`, usedFactIds: [] };
+    return { shouldReply: false, text: "", safetyReason: `AI final decision: ${parsed.reason}`, usedFactIds: [], usedContactIds: [] };
   }
 
   const allowedIds = new Set(facts.map((fact) => fact.id));
+  const allowedContactIds = new Set(input.contacts.map((contact) => contact.id));
   if (parsed.usedFactIds.some((id) => !allowedIds.has(id))) {
     throw new Error("Final AI reply referenced a fact that was not supplied by the server");
+  }
+  if (parsed.usedContactIds.some((id) => !allowedContactIds.has(id))) {
+    throw new Error("Final AI reply referenced a contact that was not supplied by the server");
   }
 
   // A local/mixed answer must explicitly ground itself in at least one supplied fact.
   // The model cannot publish a local answer with used_fact_ids: [].
-  if (input.plan.requestScope !== "global" && parsed.usedFactIds.length === 0) {
+  if (input.plan.requestScope !== "global" && parsed.usedFactIds.length === 0 && parsed.usedContactIds.length === 0) {
     return {
       shouldReply: false,
       text: "",
-      safetyReason: "Local/mixed reply blocked: no used_fact_ids",
-      usedFactIds: []
+      safetyReason: "Local/mixed reply blocked: no used fact or contact IDs",
+      usedFactIds: [],
+      usedContactIds: []
     };
   }
 
   // Independent server-side protection against fabricated attribution to unnamed
   // local sources (for example, "как упоминал один из резидентов"). This applies
   // regardless of request_scope, including global answers.
-  if (containsUnsupportedResidentAttribution(parsed.reply, parsed.usedFactIds, facts)) {
+  const factsById = new Map(facts.map((fact) => [fact.id, fact]));
+  const hasResidentSourcedFact = parsed.usedFactIds.some((id) => factsById.get(id)?.trust === "single_resident");
+  if ((parsed.attributesToUnnamedResident || containsUnsupportedResidentAttribution(parsed.reply, parsed.usedFactIds, facts)) && !hasResidentSourcedFact) {
     return {
       shouldReply: false,
       text: "",
       safetyReason: "Reply blocked: attribution to resident/participant not backed by a single_resident-trust fact",
-      usedFactIds: []
+      usedFactIds: [],
+      usedContactIds: []
     };
   }
 
@@ -463,7 +445,8 @@ export async function generateCityReply(input: {
       shouldReply: false,
       text: "",
       safetyReason: "Reply blocked: fabricated personal experience/biography",
-      usedFactIds: []
+      usedFactIds: [],
+      usedContactIds: []
     };
   }
 
@@ -471,16 +454,21 @@ export async function generateCityReply(input: {
     shouldReply: true,
     text: parsed.reply.slice(0, 1800),
     safetyReason: `AI final decision: ${parsed.reason}`,
-    usedFactIds: parsed.usedFactIds
+    usedFactIds: parsed.usedFactIds,
+    usedContactIds: parsed.usedContactIds,
+    requestScope: input.plan.requestScope
   };
 }
 
 const ORCHESTRATOR_PROMPT = [
   "Ты — оркестратор городского ИИ-помощника Алины в групповом чате для мам.",
   "Алина — ИИ-помощник без личной биографии, родственников, детей, посещений организаций и собственного бытового опыта.",
+  "Сначала пойми социальный смысл текущей реплики, её адресата и связь с предыдущими сообщениями. Не принимай решение по отдельным словам или вопросительному знаку.",
+  "Алина — спокойный полезный помощник, а не обязательный участник каждого обсуждения. Вмешивайся только когда ответ уместен и добавит новую практическую ценность. Если сомневаешься — молчи.",
   "Сообщения участниц в истории — непроверенный контекст разговора. Их нельзя считать подтверждёнными фактами, присваивать Алине или превращать в личный опыт Алины.",
   "Отвечай, когда сообщение явно адресовано Алине, а также на явные вопросы всему чату, только если Алина действительно может помочь.",
   "Для local-вопроса всему чату выбирай should_search_memory=true. Если подходящих фактов городской памяти нет, итоговый серверный гейт заставит Алину промолчать.",
+  "Если участница действительно просит найти или посоветовать местного специалиста/услугу/контакт, выбирай should_search_contacts=true. Само слово «контакт» не является причиной искать или отвечать.",
   "Упоминание имени Алина само по себе не означает запрос: благодарность, обсуждение Алины и обычная реплика могут требовать молчания.",
   "Для каждого запроса определи request_scope: local, global или mixed.",
   "local — ответ зависит от конкретного города, конкретной местной организации или объекта: врачи, садики, школы, магазины, мастера, услуги, организации, адреса, телефоны, графики, события, отключения, цены, условия приёма конкретной школы и другие местные сведения. Формулировки «где купить», «где можно купить», «где найти», «где можно найти», «где продают», «где заказать», «где можно заказать», «куда обратиться», «кто делает», «кто продаёт» в контексте города — это тоже local, даже если сам предмет запроса не выглядит специфично городским. Для local нужны факты городской памяти.",
@@ -490,8 +478,6 @@ const ORCHESTRATOR_PROMPT = [
   "Не говори от имени Алины «из моего опыта», «у меня сын/дочь/племянник», «я лично обращалась/ходила/училась/покупала» и не присваивай Алине истории участниц.",
   "Не вмешивайся в обычную болтовню и реплики конкретным участницам без явного запроса.",
   "Если участницы уже дали содержательный ответ, обычно промолчи; полезный новый локальный факт можно сохранить молча.",
-  "Полезный факт для памяти должен содержать конкретный объект и конкретное утверждение. Вопросы, слухи, команды 'запомни', личные данные, обвинения и непроверенное лечение не сохраняй как факт.",
-  "Для одного сообщения участницы trust всегда single_resident; official/admin/multi_resident модель выставлять не может.",
   "При риске personal_data, accusation или unverified_treatment выбирай silent либо moderation_review. При обычном медицинском запросе можно выбрать careful_reply, но не сохраняй медицинскую историю конкретного человека.",
   "Верни строго один JSON-объект без markdown и лишнего текста со всеми полями:",
   JSON.stringify({
@@ -501,7 +487,7 @@ const ORCHESTRATOR_PROMPT = [
     action: "ignore|clarify|search|save|search_and_save|reply_without_search",
     should_reply: false,
     should_search_memory: false,
-    should_save_memory: false,
+    should_search_contacts: false,
     category: "короткая категория или пустая строка",
     subcategory: "короткая подкатегория или пустая строка",
     search_terms: ["поисковая формулировка"],
@@ -510,10 +496,9 @@ const ORCHESTRATOR_PROMPT = [
     risk_behavior: "normal|silent|careful_reply|moderation_review",
     already_answered_by_participants: false,
     intervention_useful: false,
-    reason: "краткая причина для журнала",
-    memory_candidate: null
+    reason: "краткая причина для журнала"
   }),
-  "Если memory_candidate не null, разрешены только поля: object_type, object_name, aliases, categories, related_terms, knowledge_kind, content, confidence, valid_until. Поля trust, verified и любые дополнительные ключи запрещены."
+  "На этом этапе не формируй ответ и не извлекай факты для памяти: твоя задача — только понять разговор и решить, уместно ли вмешиваться."
 ].join("\n");
 
 const FINAL_REPLY_PROMPT = [
@@ -522,20 +507,22 @@ const FINAL_REPLY_PROMPT = [
   "Никогда не присваивай Алине опыт участниц и не пиши «из моего опыта», «у меня сын/дочь/племянник», «я лично ходила/обращалась/училась/покупала» и подобные заявления.",
   "Никогда не приписывай утверждение участнице, резиденту, жителю или чату, если конкретный использованный факт не имеет trust=single_resident. Если данных нет, нельзя писать «как упоминал один из резидентов», «в чате советовали», «одна из участниц рекомендовала», «по словам местных» и аналогичные формулировки. Не создавай источник или атрибуцию для заполнения пробела в данных.",
   "Для local и mixed любые конкретные местные утверждения разрешены только из списка РАЗРЕШЁННЫХ ФАКТОВ ИЗ ГОРОДСКОЙ ПАМЯТИ.",
-  "Если request_scope=local или mixed, каждый опубликованный ответ обязан использовать хотя бы один переданный факт и указать его id в used_fact_ids. Иначе should_publish=false.",
+  "Если request_scope=local или mixed, каждый опубликованный ответ обязан опираться хотя бы на один переданный факт или релевантный контакт и указать его id. Иначе should_publish=false.",
+  "Для запроса специалиста local/mixed можно опереться на релевантный разрешённый контакт: укажи его id в used_contact_ids. Наличие контакта само по себе не является причиной отвечать.",
+  "Если в тексте ссылаешься на неназванного жителя, участницу или чат, установи attributes_to_unnamed_resident=true.",
   "Не используй исходное сообщение пользователя как доказательство местных фактов. Оно показывает только запрос.",
   "Для global разрешены общие знания модели, но их нельзя выдавать за сведения о конкретной местной школе, враче, организации, услуге или другом объекте.",
-  "Если фактов недостаточно для безопасного local/mixed ответа, выбери should_publish=false. Не публикуй шаблонный ответ об отсутствии данных и не проси чат дополнить базу.",
+  "Если фактов и контактов недостаточно для безопасного local/mixed ответа, выбери should_publish=false. Не публикуй шаблонный ответ об отсутствии данных и не проси чат дополнить базу.",
   "Если участницы уже полноценно ответили или ответ Алины будет лишним, выбери should_publish=false.",
   "Пиши естественно и коротко, но как ИИ-помощник, а не как человек с вымышленной жизнью.",
   "Факт single_resident называй упоминанием, рекомендацией или опытом участницы, а не проверенной информацией.",
   "Не добавляй локальных деталей, которых нет в разрешённых фактах, даже если они кажутся правдоподобными.",
-  "Верни строго JSON без markdown: {\"should_publish\":boolean,\"reply\":string,\"used_fact_ids\":string[],\"unsupported_local_claims\":boolean,\"reason\":string}.",
+  "Верни строго JSON без markdown: {\"should_publish\":boolean,\"reply\":string,\"used_fact_ids\":string[],\"used_contact_ids\":string[],\"attributes_to_unnamed_resident\":boolean,\"unsupported_local_claims\":boolean,\"reason\":string}.",
   "Если есть хотя бы одно неподтверждённое локальное утверждение, установи unsupported_local_claims=true, should_publish=false и reply пустую строку."
 ].join("\n");
 
-// The final-answer model receives only the minimum decision metadata.
-// Raw chat history, free-text reason/search terms and memory_candidate are intentionally excluded.
+// The final-answer model receives compact decision metadata. Recent history is supplied
+// only to preserve conversational naturalness and must never ground local claims.
 function planToFinalPromptRecord(plan: CityAssistantPlan): Record<string, unknown> {
   return {
     request_target: plan.requestTarget,
@@ -552,12 +539,11 @@ function parsePlan(text: string): CityAssistantPlan {
 
   if (!("search_terms" in value)) value.search_terms = [];
   if (!("clarification_question" in value)) value.clarification_question = null;
-  if (!("memory_candidate" in value)) value.memory_candidate = null;
 
   assertOnlyKeys(value, [
-    "message_type", "request_target", "request_scope", "action", "should_reply", "should_search_memory", "should_save_memory",
+    "message_type", "request_target", "request_scope", "action", "should_reply", "should_search_memory", "should_search_contacts",
     "category", "subcategory", "search_terms", "clarification_question", "risk", "risk_behavior",
-    "already_answered_by_participants", "intervention_useful", "reason", "memory_candidate"
+    "already_answered_by_participants", "intervention_useful", "reason"
   ], "orchestrator decision");
 
   const action = enumValue(value.action, ACTIONS, "action");
@@ -566,8 +552,6 @@ function parsePlan(text: string): CityAssistantPlan {
   const requestScope = enumValue(value.request_scope, REQUEST_SCOPES, "request_scope");
   const risk = enumValue(value.risk, RISKS, "risk");
   const riskBehavior = enumValue(value.risk_behavior, RISK_BEHAVIORS, "risk_behavior");
-  const rawCandidate = value.memory_candidate;
-  const candidate = rawCandidate === null ? null : parseCandidate(objectValue(rawCandidate, "memory_candidate"));
 
   // --- Code-level safety guardrails (do not rely on the model following the prompt) ---
 
@@ -587,12 +571,11 @@ function parsePlan(text: string): CityAssistantPlan {
   if (requestScope === "global" || unsafeRisk) {
     shouldSearchMemory = false;
   }
+  let shouldSearchContacts = booleanValue(value.should_search_contacts, "should_search_contacts");
+  if (unsafeRisk || !shouldReply) {
+    shouldSearchContacts = false;
+  }
 
-  // Unsafe content must never enter city memory even if the model returned a candidate.
-  const shouldSaveMemory =
-    !unsafeRisk &&
-    booleanValue(value.should_save_memory, "should_save_memory") &&
-    candidate !== null;
   return {
     messageType,
     requestTarget,
@@ -600,7 +583,7 @@ function parsePlan(text: string): CityAssistantPlan {
     action,
     shouldReply,
     shouldSearchMemory,
-    shouldSaveMemory,
+    shouldSearchContacts,
     category: stringValue(value.category, "category", 120),
     subcategory: stringValue(value.subcategory, "subcategory", 120),
     searchTerms: stringArray(value.search_terms, "search_terms", 12, 160),
@@ -609,39 +592,21 @@ function parsePlan(text: string): CityAssistantPlan {
     riskBehavior,
     alreadyAnsweredByParticipants: booleanValue(value.already_answered_by_participants, "already_answered_by_participants"),
     interventionUseful: booleanValue(value.intervention_useful, "intervention_useful"),
-    reason: stringValue(value.reason, "reason", 500),
-    memoryCandidate: shouldSaveMemory ? candidate : null
+    reason: stringValue(value.reason, "reason", 500)
   };
 }
 
-function parseCandidate(value: Record<string, unknown>): CityMemoryCandidate {
-  assertOnlyKeys(value, ["object_type", "object_name", "aliases", "categories", "related_terms", "knowledge_kind", "content", "confidence", "valid_until"], "memory_candidate");
-  const objectTypes = ["organization", "institution", "place", "service", "event", "temporary_change", "recommendation", "topic"] as const;
-  const knowledgeKinds = ["address", "contact", "service", "hours", "event", "temporary_change", "resident_recommendation", "correction", "summary"] as const;
-  const confidence = numberValue(value.confidence, "memory_candidate.confidence", 0, 1);
-  return {
-    objectType: enumValue(value.object_type, objectTypes, "memory_candidate.object_type"),
-    objectName: nonEmptyString(value.object_name, "memory_candidate.object_name", 200),
-    aliases: stringArray(value.aliases, "memory_candidate.aliases", 12, 120),
-    categories: stringArray(value.categories, "memory_candidate.categories", 12, 120),
-    relatedTerms: stringArray(value.related_terms, "memory_candidate.related_terms", 16, 120),
-    knowledgeKind: enumValue(value.knowledge_kind, knowledgeKinds, "memory_candidate.knowledge_kind"),
-    content: nonEmptyString(value.content, "memory_candidate.content", 2000),
-    confidence: Math.min(confidence, 0.75),
-    trust: "single_resident",
-    validUntil: nullableString(value.valid_until, "memory_candidate.valid_until", 50)
-  };
-}
-
-function parseFinalReply(text: string): { shouldPublish: boolean; reply: string; usedFactIds: string[]; reason: string } {
+function parseFinalReply(text: string): { shouldPublish: boolean; reply: string; usedFactIds: string[]; usedContactIds: string[]; attributesToUnnamedResident: boolean; reason: string } {
   const value = parseStrictJson(text);
-  assertOnlyKeys(value, ["should_publish", "reply", "used_fact_ids", "unsupported_local_claims", "reason"], "final reply");
+  assertOnlyKeys(value, ["should_publish", "reply", "used_fact_ids", "used_contact_ids", "attributes_to_unnamed_resident", "unsupported_local_claims", "reason"], "final reply");
   const unsupported = booleanValue(value.unsupported_local_claims, "unsupported_local_claims");
   const shouldPublish = booleanValue(value.should_publish, "should_publish") && !unsupported;
   return {
     shouldPublish,
     reply: stringValue(value.reply, "reply", 1800),
     usedFactIds: stringArray(value.used_fact_ids, "used_fact_ids", 30, 100),
+    usedContactIds: stringArray(value.used_contact_ids, "used_contact_ids", 10, 200),
+    attributesToUnnamedResident: booleanValue(value.attributes_to_unnamed_resident, "attributes_to_unnamed_resident"),
     reason: stringValue(value.reason, "reason", 500)
   };
 }
@@ -692,7 +657,7 @@ export function containsUnsupportedResidentAttribution(
   const normalized = text.toLowerCase().replace(/\s+/g, " ").trim();
 
   const attributionPatterns = [
-    /(?:^|[^\p{L}\p{N}])как (?:упоминал\p{L}*|советовал\p{L}*|рекомендовал\p{L}*|писал\p{L}*|говорил\p{L}*) (?:один из резидентов|одна из участниц|кто-то из участниц|кто-то из резидентов|кто-то)(?=[^\p{L}\p{N}]|$)/u,
+    /(?:^|[^\p{L}\p{N}])как (?:упоминал\p{L}*|советовал\p{L}*|рекомендовал\p{L}*|писал\p{L}*|говорил\p{L}*|отмечал\p{L}*|делил\p{L}*|рассказывал\p{L}*) (?:один из резидентов|одна из участниц|одна из жительниц(?: города)?|кто-то из участниц|кто-то из резидентов|кто-то)(?=[^\p{L}\p{N}]|$)/u,
     /(?:^|[^\p{L}\p{N}])(?:один из резидентов|одна из участниц|кто-то из участниц|кто-то из резидентов|участницы|резиденты) (?:упоминал\p{L}*|советовал\p{L}*|рекомендовал\p{L}*|писал\p{L}*|говорил\p{L}*)(?=[^\p{L}\p{N}]|$)/u,
     /(?:^|[^\p{L}\p{N}])(?:в чате|здесь) (?:писал\p{L}*|советовал\p{L}*|рекомендовал\p{L}*|упоминал\p{L}*)(?=[^\p{L}\p{N}]|$)/u,
     /(?:^|[^\p{L}\p{N}])по словам (?:резидентов|участниц|местных)(?=[^\p{L}\p{N}]|$)/u
@@ -713,11 +678,13 @@ export function containsUnsupportedResidentAttribution(
 // requested item itself is generic.
 export function isExplicitLocalLookupRequest(text: string): boolean {
   const end = String.raw`(?=[^\p{L}\p{N}]|$)`;
-  const pattern = new RegExp(
-    String.raw`(?:^|\s)(?:где\s+(?:можно\s+)?(?:купить|найти|заказать|продают)|куда\s+обратиться|кто\s+(?:делает|прода[её]т))${end}`,
-    "iu"
-  );
-  return pattern.test(text);
+  const patterns = [
+    new RegExp(String.raw`(?:^|\s)(?:где\s+(?:можно\s+)?(?:купить|найти|заказать|продают)|куда\s+обратиться|кто\s+(?:делает|прода[её]т|оказывает)|как\s+(?:добраться|проехать))${end}`, "iu"),
+    new RegExp(String.raw`(?:^|\s)где\s[\s\S]{0,60}?(?:^|\s)(?:наход(?:ится|ятся)|располож(?:ен|ена|ено|ены))${end}`, "iu"),
+    new RegExp(String.raw`(?:^|\s)по\s+какому\s+адресу${end}`, "iu"),
+    new RegExp(String.raw`(?:^|\s)есть\s+ли\s+(?:у\s+нас|в\s+нашем\s+городе)${end}`, "iu")
+  ];
+  return patterns.some((pattern) => pattern.test(text));
 }
 
 function applyDeterministicLocalLookupOverride(

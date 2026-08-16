@@ -732,14 +732,16 @@ export class LocalEngagementRepository implements EngagementRepository {
       const existing = data.contactDirectory.find((item) =>
         item.channelId === input.channel.id && (
           (input.candidate.maxContactId && item.maxContactId === input.candidate.maxContactId) ||
-          (!input.candidate.maxContactId && normalizedPhone && item.normalizedPhone === normalizedPhone) ||
-          (!input.candidate.maxContactId && !normalizedPhone && item.attachmentFingerprint === input.candidate.attachmentFingerprint)
+          (normalizedPhone && item.normalizedPhone === normalizedPhone) ||
+          item.attachmentFingerprint === input.candidate.attachmentFingerprint
         )
       );
       const now = input.message.postedAt ?? new Date().toISOString();
       if (existing) {
-        existing.category = input.candidate.category;
-        existing.normalizedCategory = normalizedCategory;
+        if (normalizedCategory !== "контакт" || existing.normalizedCategory === "контакт") {
+          existing.category = input.candidate.category;
+          existing.normalizedCategory = normalizedCategory;
+        }
         existing.contactName = input.candidate.contactName;
         existing.phone = input.candidate.phone;
         existing.normalizedPhone = normalizedPhone;
@@ -796,6 +798,7 @@ export class LocalEngagementRepository implements EngagementRepository {
     channelId?: string | null;
     query: string;
     limit?: number;
+    excludeSourceId?: string;
   }): Promise<CityMemorySearchResult[]> {
     const data = await this.read();
     return searchCityMemory(data.cityMemory, input);

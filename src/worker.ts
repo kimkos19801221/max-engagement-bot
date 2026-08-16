@@ -3,12 +3,15 @@ import { config as loadDotenv } from "dotenv";
 
 import { hasStopTrigger, looksLikeQuestion } from "./max-engagement/content-safety.js";
 import { generateDryRunDraft, generatePostInitiativeDraft } from "./max-engagement/draft-generator.js";
-import { buildFallbackCityReply, decideCityReply, type CityAssistantReply } from "./max-engagement/city-assistant.js";
+import { analyzeCityMessage, buildFallbackCityReply, generateCityReply, type CityAssistantReply } from "./max-engagement/city-assistant.js";
+import type { CityMemoryCandidate } from "./city-memory/types.js";
 import { moderateChatMessage } from "./max-engagement/antispam.js";
 import {
+  buildFallbackContactDirectoryCandidate,
   buildMaxContactAttachments,
   classifyProfessionalContactAttachment,
   formatContactDirectoryText,
+  hasContactAttachment,
   hasRawAttachments,
   type ContactDirectoryRecord
 } from "./max-engagement/contact-directory.js";
@@ -198,19 +201,6 @@ async function processChatMessage(
     return "skipped";
   }
 
-  const mentionsBot = Boolean(channel.botName && message.text.toLowerCase().includes(channel.botName.toLowerCase()));
-  const isQuestion = looksLikeQuestion(message.text);
-  const modeAllows =
-    channel.mode === "city_assistant" ||
-    channel.mode === "suitable_messages" ||
-    (channel.mode === "mentions_only" && mentionsBot) ||
-    (channel.mode === "questions_only" && isQuestion);
-
-  if (!modeAllows || channel.mode === "moderation_only" || channel.mode === "off") {
-    await repository.markChatMessageProcessed(message.id);
-    return "skipped";
-  }
-
   /*
    * Отдельный тихий pipeline для карточек контактов специалистов.
    * Он выполняется до reply-rate-limit: сохранение контакта не является публичным ответом.
@@ -218,6 +208,7 @@ async function processChatMessage(
    * не теряется и может быть изучен позже.
    */
   if (hasRawAttachments(message)) {
+    let contactSaved = false;
     try {
       const contactContext = await repository.listRecentChatMessages(channel.id, message.postedAt, 12);
       const candidate = await classifyProfessionalContactAttachment({
@@ -228,8 +219,18 @@ async function processChatMessage(
 
       if (candidate) {
         await repository.saveContactDirectoryCandidate({ channel, message, candidate });
-        await repository.markChatMessageProcessed(message.id);
-        return "skipped";
+        contactSaved = true;
+      }
+
+      if (!contactSaved && hasContactAttachment(message)) {
+        const fallbackCandidate = buildFallbackContactDirectoryCandidate({
+          message,
+          recentMessages: contactContext
+        });
+        if (fallbackCandidate) {
+          await repository.saveContactDirectoryCandidate({ channel, message, candidate: fallbackCandidate });
+          contactSaved = true;
+        }
       }
     } catch (error) {
       console.error(`[worker] contact_directory_save_skipped channel=${channel.id} message=${message.id}: ${formatWorkerError(error)}`);
@@ -243,13 +244,45 @@ async function processChatMessage(
     }
   }
 
+  const mentionsBot = Boolean(channel.botName && message.text.toLowerCase().includes(channel.botName.toLowerCase()));
+  const isQuestion = looksLikeQuestion(message.text);
+  const modeAllows =
+    channel.mode === "city_assistant" ||
+    channel.mode === "suitable_messages" ||
+    (channel.mode === "mentions_only" && mentionsBot) ||
+    (channel.mode === "questions_only" && isQuestion);
+
+  if (!modeAllows || channel.mode === "moderation_only" || channel.mode === "off") {
+    await repository.markChatMessageProcessed(message.id);
+    return "skipped";
+  }
+
   const [replyCountHour, replyCountDay, recentMessages] = await Promise.all([
     repository.countActions(channel.id, "reply", new Date(Date.now() - HOUR_MS).toISOString()),
     repository.countActions(channel.id, "reply", new Date(Date.now() - DAY_MS).toISOString()),
     repository.listRecentChatMessages(channel.id, message.postedAt, 40)
   ]);
 
+  const replyToMessage = message.replyToMaxMessageId
+    ? recentMessages.find((item) => item.maxMessageId === message.replyToMaxMessageId) ?? null
+    : null;
+
+  // The decision model must not see retrieved facts or contacts: available data must
+  // never become a reason to interrupt a conversation. Memory extraction is independent
+  // and best-effort, so a learning failure cannot suppress a useful reply.
+  const [plan, extractedMemory] = await Promise.all([
+    analyzeCityMessage({ channel, message, recentMessages, replyToMessage }),
+    extractCityMemoryCandidatesSafely({ channel, message, recentMessages, replyToMessage })
+  ]);
+
+  if (!plan.shouldReply) {
+    await saveMemoryCandidatesSafely(repository, channel, message, extractedMemory);
+    await repository.markChatMessageProcessed(message.id);
+    return "skipped";
+  }
+
   if (replyCountHour >= channel.replyLimitHour || replyCountDay >= channel.replyLimitDay) {
+    await saveMemoryCandidatesSafely(repository, channel, message, extractedMemory);
     await repository.createBotAction({
       channelId: channel.id, postId: null, chatMessageId: message.id, threadId: null, triggerCommentId: null,
       actionType: "reply", status: "skipped", requestedTeasingLevel: 0, finalTeasingLevel: 0,
@@ -259,46 +292,20 @@ async function processChatMessage(
     return "skipped";
   }
 
-  const replyToMessage = message.replyToMaxMessageId
-    ? recentMessages.find((item) => item.maxMessageId === message.replyToMaxMessageId) ?? null
-    : null;
-
-  // Background learning is independent from the public reply decision. Every useful
-  // resident message may enrich city memory, while the main agent remains free to stay silent.
-  try {
-    const extractedMemory = await extractCityMemoryCandidatesFromMessage({
-      channel,
-      message,
-      recentMessages,
-      replyToMessage
-    });
-    for (const candidate of extractedMemory) {
-      await repository.ingestCityMemoryCandidate({
-        channel,
-        sourceId: message.maxMessageId || message.id,
-        authorName: message.authorName,
-        text: message.text,
-        receivedAt: message.postedAt,
-        candidate
-      });
-    }
-  } catch (error) {
-    console.error(`City memory extraction skipped for ${message.id}: ${formatWorkerError(error)}`);
-  }
-
-  // Retrieval happens before the one public-decision model call. Raw chat history is
-  // conversation context only; concrete local claims may come only from these stores.
-  const retrievalQuery = [message.text, replyToMessage?.text ?? ""].filter(Boolean).join(" ").slice(0, 2000);
+  const plannedQuery = plan.searchTerms.map((term) => term.trim()).filter(Boolean).join(" ");
+  const retrievalQuery = (plannedQuery || [message.text, replyToMessage?.text ?? ""].filter(Boolean).join(" ")).slice(0, 2000);
   let memory = [] as Awaited<ReturnType<EngagementRepository["searchCityMemory"]>>;
   let contacts: ContactDirectoryRecord[] = [];
   try {
     [memory, contacts] = await Promise.all([
-      repository.searchCityMemory({ query: retrievalQuery || message.text, channelId: channel.id, limit: 10 }),
-      repository.searchContactDirectory({
+      plan.shouldSearchMemory
+        ? repository.searchCityMemory({ query: retrievalQuery || message.text, channelId: channel.id, limit: 10, excludeSourceId: message.maxMessageId || message.id })
+        : Promise.resolve([]),
+      plan.shouldSearchContacts ? repository.searchContactDirectory({
         channel,
         query: { text: retrievalQuery || message.text },
         limit: 6
-      })
+      }) : Promise.resolve([])
     ]);
   } catch (error) {
     console.error(`[worker] city_context_retrieval_failed channel=${channel.id} message=${message.id}: ${formatWorkerError(error)}`);
@@ -307,24 +314,19 @@ async function processChatMessage(
   const latestMessages = await repository.listRecentChatMessages(channel.id, null, 40);
   let draft: CityAssistantReply;
   try {
-    draft = await decideCityReply({
+    draft = await generateCityReply({
       channel,
       message,
       recentMessages: latestMessages,
-      replyToMessage,
+      plan,
       memory,
       contacts
     });
   } catch (error) {
     const reason = `OpenAI city agent skipped: ${error instanceof Error ? error.message : String(error)}`;
-    return await createAndMaybePublishChatReply({
-      repository,
-      maxClient,
-      channel,
-      message,
-      draft: buildFallbackCityReply({ channel, message, reason }),
-      availableContacts: contacts
-    });
+    draft = buildFallbackCityReply({ channel, message, reason });
+  } finally {
+    await saveMemoryCandidatesSafely(repository, channel, message, extractedMemory);
   }
 
   return await createAndMaybePublishChatReply({
@@ -335,6 +337,42 @@ async function processChatMessage(
     draft,
     availableContacts: contacts
   });
+}
+
+async function extractCityMemoryCandidatesSafely(input: {
+  channel: MaxEngagementChannelRecord;
+  message: MaxEngagementChatMessageRecord;
+  recentMessages: MaxEngagementChatMessageRecord[];
+  replyToMessage: MaxEngagementChatMessageRecord | null;
+}): Promise<CityMemoryCandidate[]> {
+  try {
+    return await extractCityMemoryCandidatesFromMessage(input);
+  } catch (error) {
+    console.error(`[worker] city_memory_extraction_skipped message=${input.message.id}: ${formatWorkerError(error)}`);
+    return [];
+  }
+}
+
+async function saveMemoryCandidatesSafely(
+  repository: EngagementRepository,
+  channel: MaxEngagementChannelRecord,
+  message: MaxEngagementChatMessageRecord,
+  candidates: CityMemoryCandidate[]
+): Promise<void> {
+  try {
+    for (const candidate of candidates) {
+      await repository.ingestCityMemoryCandidate({
+        channel,
+        sourceId: message.maxMessageId || message.id,
+        authorName: message.authorName,
+        text: message.text,
+        receivedAt: message.postedAt,
+        candidate
+      });
+    }
+  } catch (error) {
+    console.error(`[worker] city_memory_save_skipped message=${message.id}: ${formatWorkerError(error)}`);
+  }
 }
 
 async function createAndMaybePublishChatReply(input: {

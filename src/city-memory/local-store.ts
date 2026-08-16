@@ -142,7 +142,7 @@ export function ingestCityMemoryCandidate(
 
 export function searchCityMemory(
   state: CityMemoryState,
-  input: { cityName?: string | null; channelId?: string | null; query: string; limit?: number }
+  input: { cityName?: string | null; channelId?: string | null; query: string; limit?: number; excludeSourceId?: string }
 ): CityMemorySearchResult[] {
   const cityIds = new Set(
     state.cities
@@ -155,13 +155,20 @@ export function searchCityMemory(
       .map((item) => item.id)
   );
   const terms = expandQueryTerms(input.query);
+  const excludedInternalSourceIds = new Set(
+    state.sources.filter((source) => source.sourceId === input.excludeSourceId).map((source) => source.id)
+  );
   const scored = state.objects
     .filter((object) => !object.mergedIntoId)
     .filter((object) => (cityIds.size === 0 || cityIds.has(object.cityId)) && (publicIds.size === 0 || publicIds.has(object.publicId)))
     .map((object) => ({
       object,
       score: scoreObject(object, terms),
-      knowledge: state.knowledge.filter((item) => item.objectId === object.id && item.status !== "deleted")
+      knowledge: state.knowledge.filter((item) =>
+        item.objectId === object.id &&
+        item.status !== "deleted" &&
+        (excludedInternalSourceIds.size === 0 || item.sourceIds.some((sourceId) => !excludedInternalSourceIds.has(sourceId)))
+      )
     }))
     .filter((item) => item.score > 0 && item.knowledge.length > 0)
     .sort((left, right) => right.score - left.score)

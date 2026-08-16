@@ -100,6 +100,7 @@ export type EngagementRepository = {
     channelId?: string;
     cityName?: string;
     limit?: number;
+    excludeSourceId?: string;
   }): Promise<CityMemorySearchResult[]>;
 
   ingestCityMemoryCandidate(input: {
@@ -482,6 +483,7 @@ export class MaxEngagementRepository implements EngagementRepository {
     channelId?: string;
     cityName?: string;
     limit?: number;
+    excludeSourceId?: string;
   }): Promise<CityMemorySearchResult[]> {
     let publicQuery = this.supabase
       .from("city_memory_publics")
@@ -512,6 +514,17 @@ export class MaxEngagementRepository implements EngagementRepository {
     const publicIds = allowedPublics.map((row) => String(row.id));
     if (publicIds.length === 0) return [];
 
+    let excludedInternalSourceIds = new Set<string>();
+    if (input.excludeSourceId) {
+      const { data: excludedSources, error: excludedSourcesError } = await this.supabase
+        .from("city_memory_sources")
+        .select("id")
+        .in("public_id", publicIds)
+        .eq("source_id", input.excludeSourceId);
+      if (excludedSourcesError) throw excludedSourcesError;
+      excludedInternalSourceIds = new Set((excludedSources ?? []).map((row) => String(row.id)));
+    }
+
     const { data: objects, error: objectsError } = await this.supabase
       .from("city_memory_objects")
       .select("id, city_id, public_id, object_type, canonical_name, aliases, categories, related_terms, merged_into_id, confidence, created_at, updated_at")
@@ -540,7 +553,13 @@ export class MaxEngagementRepository implements EngagementRepository {
     if (knowledgeError) throw knowledgeError;
 
     return scored.map(({ row, score }) => {
-      const itemKnowledge = (knowledge ?? []).filter((item) => String(item.object_id) === String(row.id));
+      const itemKnowledge = (knowledge ?? [])
+        .filter((item) => String(item.object_id) === String(row.id))
+        .filter((item) => {
+          if (excludedInternalSourceIds.size === 0) return true;
+          const sourceIds = Array.isArray(item.source_ids) ? item.source_ids.map(String) : [];
+          return sourceIds.some((sourceId) => !excludedInternalSourceIds.has(sourceId));
+        });
       return {
         object: mapCityMemoryObject(row as Record<string, unknown>),
         knowledge: itemKnowledge.map((item) => mapCityMemoryKnowledge(item as Record<string, unknown>)),
@@ -715,34 +734,25 @@ export class MaxEngagementRepository implements EngagementRepository {
     const normalizedCategory = normalizeCategory(input.candidate.category);
     const now = input.message.postedAt ?? new Date().toISOString();
 
-    let existingQuery = this.supabase
-      .from("city_contact_directory")
-      .select("id, times_shared");
-
-    if (input.candidate.maxContactId) {
-      existingQuery = existingQuery
-        .eq("channel_id", input.channel.id)
-        .eq("max_contact_id", input.candidate.maxContactId);
-    } else if (normalizedPhone) {
-      existingQuery = existingQuery
-        .eq("channel_id", input.channel.id)
-        .eq("normalized_phone", normalizedPhone);
-    } else {
-      existingQuery = existingQuery
-        .eq("channel_id", input.channel.id)
-        .eq("attachment_fingerprint", input.candidate.attachmentFingerprint);
-    }
-
-    const { data: existingRows, error: lookupError } = await existingQuery.limit(1);
-    if (lookupError) throw lookupError;
-    const existing = existingRows?.[0];
+    const existing = await this.findExistingContactDirectoryRow({
+      channelId: input.channel.id,
+      maxContactId: input.candidate.maxContactId,
+      normalizedPhone,
+      attachmentFingerprint: input.candidate.attachmentFingerprint
+    });
 
     if (existing) {
+      const category = normalizedCategory === "контакт" && typeof existing.category === "string" && existing.category !== "контакт"
+        ? existing.category
+        : input.candidate.category;
+      const nextNormalizedCategory = normalizedCategory === "контакт" && typeof existing.normalized_category === "string" && existing.normalized_category !== "контакт"
+        ? existing.normalized_category
+        : normalizedCategory;
       const { error } = await this.supabase
         .from("city_contact_directory")
         .update({
-          category: input.candidate.category,
-          normalized_category: normalizedCategory,
+          category,
+          normalized_category: nextNormalizedCategory,
           contact_name: input.candidate.contactName,
           phone: input.candidate.phone,
           normalized_phone: normalizedPhone,
@@ -782,6 +792,31 @@ export class MaxEngagementRepository implements EngagementRepository {
         times_shared: 1
       });
     if (error) throw error;
+  }
+
+  private async findExistingContactDirectoryRow(input: {
+    channelId: string;
+    maxContactId: string | null;
+    normalizedPhone: string | null;
+    attachmentFingerprint: string;
+  }): Promise<{ id: unknown; times_shared?: unknown; category?: unknown; normalized_category?: unknown } | null> {
+    const lookups = [
+      input.maxContactId ? { column: "max_contact_id", value: input.maxContactId } : null,
+      input.normalizedPhone ? { column: "normalized_phone", value: input.normalizedPhone } : null,
+      { column: "attachment_fingerprint", value: input.attachmentFingerprint }
+    ].filter((item): item is { column: string; value: string } => item !== null);
+
+    for (const lookup of lookups) {
+      const { data, error } = await this.supabase
+        .from("city_contact_directory")
+        .select("id, times_shared, category, normalized_category")
+        .eq("channel_id", input.channelId)
+        .eq(lookup.column, lookup.value)
+        .limit(1);
+      if (error) throw error;
+      if (data?.[0]) return data[0];
+    }
+    return null;
   }
 
   async searchContactDirectory(input: {

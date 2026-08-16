@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildFallbackCityReply } from "./city-assistant.js";
+import { buildFallbackCityReply, containsUnsupportedResidentAttribution, isExplicitLocalLookupRequest } from "./city-assistant.js";
 import type { MaxEngagementChannelRecord, MaxEngagementChatMessageRecord } from "./types.js";
 
 describe("buildFallbackCityReply", () => {
@@ -26,6 +26,44 @@ describe("buildFallbackCityReply", () => {
     expect(reply.shouldReply).toBe(false);
     expect(reply.text).toBe("");
     expect(reply.safetyReason).toContain("Fallback silent");
+  });
+});
+
+describe("isExplicitLocalLookupRequest", () => {
+  it.each([
+    "Где найти морскую свинку?",
+    "Где в Норильске находится православная церковь?",
+    "По какому адресу принимает врач?",
+    "Есть ли у нас частные садики?",
+    "Кто оказывает услуги сантехника?"
+  ])("recognizes a high-confidence local lookup: %s", (text) => {
+    expect(isExplicitLocalLookupRequest(text)).toBe(true);
+  });
+
+  it.each([
+    "Есть ли польза от витаминов?",
+    "Есть ли смысл покупать увлажнитель?",
+    "Есть ли противопоказания?"
+  ])("does not turn a general question into a local lookup: %s", (text) => {
+    expect(isExplicitLocalLookupRequest(text)).toBe(false);
+  });
+});
+
+describe("containsUnsupportedResidentAttribution", () => {
+  it("blocks an unsupported attribution using production wording", () => {
+    expect(containsUnsupportedResidentAttribution(
+      "В Норильске есть частные садики, как отмечала одна из жительниц города.",
+      [],
+      []
+    )).toBe(true);
+  });
+
+  it("allows attribution backed by a cited resident fact", () => {
+    expect(containsUnsupportedResidentAttribution(
+      "Как отмечала одна из жительниц города, адрес — Мира 6.",
+      ["fact-1"],
+      [{ id: "fact-1", trust: "single_resident" }]
+    )).toBe(false);
   });
 });
 
